@@ -3,7 +3,8 @@
 Usage: pty-run.py --cols 140 --rows 40 --timeout 25 --keys "2:/tree\r" --keys "6:q" -- opencode ...
 Each --keys is "<delay_seconds>:<text>" (\\r for Enter, \\x1b for Esc, \\x11 for ctrl+q), or
 "@<regex>+<delay_seconds>:<text>" to wait until <regex> appears in the ANSI-stripped output, then
-<delay_seconds> more, before sending. Conditional keys are processed in order after all timed keys."""
+<delay_seconds> more, before sending ("@!<regex>+..." matches only output produced after the previous
+key was sent). Conditional keys are processed in order after all timed keys."""
 import argparse, os, pty, select, sys, time, fcntl, termios, struct, signal
 p = argparse.ArgumentParser(); p.add_argument("--cols", type=int, default=140); p.add_argument("--rows", type=int, default=40)
 p.add_argument("--timeout", type=float, default=20); p.add_argument("--keys", action="append", default=[]); p.add_argument("--out", default="pty.out")
@@ -20,13 +21,14 @@ def decode(t): return t.encode().decode("unicode_escape").encode("latin1")
 timed = []; cond = []
 for k in a.keys:
     if k.startswith("@"):
-        pat, rest = k[1:].split("+", 1); delay, text = rest.split(":", 1)
-        cond.append((re.compile(pat), float(delay), decode(text)))
+        fresh = k.startswith("@!")
+        pat, rest = k[2 if fresh else 1:].split("+", 1); delay, text = rest.split(":", 1)
+        cond.append((re.compile(pat), float(delay), decode(text), fresh))
     else:
         delay, text = k.split(":", 1); timed.append((float(delay), decode(text)))
 timed.sort(key=lambda x: x[0])
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[=>]|\x1b\([A-Z]")
-start = time.time(); buf = b""; ki = 0; ci = 0; seen_at = None
+start = time.time(); buf = b""; ki = 0; ci = 0; seen_at = None; mark = 0
 try:
     import pyte
     screen = pyte.Screen(a.cols, a.rows); stream = pyte.ByteStream(screen)
@@ -40,14 +42,15 @@ while time.time() - start < a.timeout:
     now = time.time() - start
     while ki < len(timed) and now >= timed[ki][0]:
         snapshot(f"before timed key {ki}: {timed[ki][1]!r}")
-        os.write(fd, timed[ki][1]); ki += 1
+        os.write(fd, timed[ki][1]); ki += 1; mark = len(buf)
     if ki >= len(timed) and ci < len(cond):
-        pat, delay, text = cond[ci]
+        pat, delay, text, fresh = cond[ci]
         if seen_at is None:
-            if pat.search(ANSI.sub(b"", buf[-200000:]).decode("utf8", "replace")): seen_at = time.time()
+            window = buf[mark:] if fresh else buf[-200000:]
+            if pat.search(ANSI.sub(b"", window).decode("utf8", "replace")): seen_at = time.time()
         elif time.time() - seen_at >= delay:
             snapshot(f"before conditional key {ci}: {text!r}")
-            os.write(fd, text); ci += 1; seen_at = None
+            os.write(fd, text); ci += 1; seen_at = None; mark = len(buf)
     r, _, _ = select.select([fd], [], [], 0.1)
     if r:
         try: d = os.read(fd, 65536)
@@ -59,7 +62,19 @@ while time.time() - start < a.timeout:
             except Exception: pass
     if ki >= len(timed) and ci >= len(cond) and a.exit_when_done:
         break
-if a.exit_when_done: time.sleep(1.0)
+if a.exit_when_done:
+    # keep draining for a second so output produced after the last key lands in the capture
+    end = time.time() + 1.0
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if not r: continue
+        try: d = os.read(fd, 65536)
+        except OSError: break
+        if not d: break
+        buf += d
+        if stream is not None:
+            try: stream.feed(d)
+            except Exception: pass
 try: os.kill(pid, signal.SIGTERM)
 except Exception: pass
 snapshot("final")

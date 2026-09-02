@@ -4,13 +4,16 @@
  * `/branch`, `/label`, the `ctree` route, and the prompt-side gauge slot.
  */
 import type { TuiPluginApi, TuiPlugin } from "@opencode-ai/plugin/tui"
-import { createEffect, createMemo, createSignal } from "solid-js"
+import { createEffect, createMemo, createSignal, on } from "solid-js"
 import { bandFor, contextSizeOf, type MinimalMessage, type MinimalPart } from "../core/tokens.js"
 import { JournalStore, type StorageMode } from "../shared/store.js"
 import { debug } from "../shared/debug.js"
-import { createNamedBranch, mergeBranch, setLabel, type MergeMode } from "./actions.js"
+import { bumpJournal, createNamedBranch, journalRevision, mergeBranch, setLabel, type MergeMode } from "./actions.js"
 import { hasEditor } from "./editor.js"
 import { TreeRoute, formatK } from "./route.js"
+import { parseForkTitle } from "../core/adopt.js"
+import { adoptNativeForks } from "../shared/adopt.js"
+import { fetchTranscript, modelContextLimit } from "./transcripts.js"
 
 const BAND_COLOR = { low: "success", healthy: "success", filling: "warning", red: "error" } as const
 
@@ -55,6 +58,13 @@ function toMinimalMessages(messages: readonly any[], part: (messageID: string) =
   }))
 }
 
+/** A branch's display name: adopted native forks carry no journal `name`, so fall back to
+ *  the session's own title (DESIGN.md §4.1's `kind: "native"`). */
+function branchLabel(api: TuiPluginApi, sessionID: string, name: string | undefined, max?: number): string {
+  const label = name ?? api.state.session.get(sessionID)?.title ?? "branch"
+  return max !== undefined && label.length > max ? `${label.slice(0, max - 1)}…` : label
+}
+
 function currentSession(api: TuiPluginApi): string | undefined {
   const cur = api.route.current
   return cur.name === "session" ? ((cur.params as { sessionID?: string } | undefined)?.sessionID ?? undefined) : undefined
@@ -65,6 +75,40 @@ const tui: TuiPlugin = async (api, rawOptions) => {
   const directory = api.state.path.directory
   const store = new JournalStore({ worktree: api.state.path.worktree || directory, stateDir: api.state.path.state, mode: options.storage })
   debug("tui.loaded", { path: api.state.path, options })
+
+  // Native `/fork` sessions are invisible to the journal until adopted; `adopted` lets an
+  // open route know a branch appeared (DESIGN.md §4.1's `kind: "native"`).
+  const [adopted, setAdopted] = createSignal(0)
+  const adopt = async () => {
+    const found = await adoptNativeForks({
+      store,
+      directory,
+      actor: "tui",
+      listSessions: async () => {
+        const res = await api.client.session.list({ directory })
+        return ((res.data as any[]) ?? []).map((s) => ({ id: s.id as string, title: (s.title as string) ?? "", created: (s.time?.created as number) ?? 0, parentID: s.parentID as string | undefined, directory: s.directory as string | undefined }))
+      },
+      messagesOf: async (sessionID) => (await fetchTranscript(api, sessionID, directory)).messages.map((m) => ({ id: m.id, role: m.role, created: m.time.created })),
+    })
+    // the server half may have adopted first: refresh either way so the card and route re-read
+    setAdopted((n) => n + 1)
+    bumpJournal()
+    return found
+  }
+
+  /** The `session.created` event fires before the fork's messages are copied, so wait, then retry. */
+  const adoptSoon = async () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await new Promise((r) => setTimeout(r, 1000))
+      if ((await adopt()).length > 0) return
+    }
+  }
+
+  const offCreated = api.event.on("session.created", (event) => {
+    const info = event.properties.info
+    if (!info.parentID && parseForkTitle(info.title ?? "")) void adoptSoon()
+  })
+  api.lifecycle?.onDispose(offCreated)
 
   const promptDialog = (title: string, placeholder?: string) =>
     new Promise<string | undefined>((resolve) => {
@@ -109,6 +153,7 @@ const tui: TuiPlugin = async (api, rawOptions) => {
         slashAliases: ["ctree", "panel"],
         run: () => {
           const sessionID = currentSession(api)
+          void adopt()
           api.route.navigate("ctree", sessionID ? { sessionID } : {})
           api.ui.dialog.clear()
         },
@@ -251,6 +296,7 @@ const tui: TuiPlugin = async (api, rawOptions) => {
           store={store}
           directory={directory}
           sessionID={params?.["sessionID"] as string | undefined}
+          refresh={adopted}
           options={{ jumpSummary: options.jumpSummary, hardCrop: options.hardCrop, keybinds: options.keybinds }}
           initialView={params?.["view"] === "decisions" ? "decisions" : "tree"}
         />
@@ -262,7 +308,11 @@ const tui: TuiPlugin = async (api, rawOptions) => {
     slots: {
       sidebar_content: (_ctx, props: { session_id: string }) => {
         const t = api.theme.current
-        const st = () => store.stateForSession(props.session_id)
+        // the journal is plain files: without the revision the card would render once per session
+        const st = createMemo(() => {
+          journalRevision()
+          return store.stateForSession(props.session_id)
+        })
         const branch = () => st()?.sessions[props.session_id]
         const crops = () => st()?.activeCrops(props.session_id) ?? []
         const hidden = () => crops().reduce((s, c) => s + c.targets.reduce((x, y) => x + y.estTokens, 0), 0)
@@ -270,7 +320,7 @@ const tui: TuiPlugin = async (api, rawOptions) => {
         return (
           <box flexDirection="column">
             <text fg={t.textMuted}>Context tree</text>
-            <text fg={branch() ? t.success : t.text}>{branch() ? `⎇ ${branch()!.name ?? "branch"} · ${branch()!.status}` : `trunk${siblings() ? ` · ${siblings()} open branch${siblings() === 1 ? "" : "es"}` : ""}`}</text>
+            <text fg={branch() ? t.success : t.text}>{branch() ? `⎇ ${branchLabel(api, props.session_id, branch()!.name)} · ${branch()!.status}` : `trunk${siblings() ? ` · ${siblings()} open branch${siblings() === 1 ? "" : "es"}` : ""}`}</text>
             <text fg={crops().length ? t.warning : t.textMuted}>{crops().length ? `✂ ${crops().length} crop${crops().length === 1 ? "" : "s"} · ~${formatK(hidden())} hidden from model` : "no crops"}</text>
             <text fg={t.textMuted}>/tree · ctrl+q</text>
           </box>
@@ -280,15 +330,12 @@ const tui: TuiPlugin = async (api, rawOptions) => {
         const t = api.theme.current
         const size = createMemo(() => contextSizeOf(toMinimalMessages(api.state.session.messages(props.session_id), api.state.part)))
         const band = () => bandFor(size().tokens)
-        const branch = () => store.stateForSession(props.session_id)?.sessions[props.session_id]
+        const branch = () => {
+          journalRevision() // the journal is plain files: without the revision `⎇ name` never refreshes
+          return store.stateForSession(props.session_id)?.sessions[props.session_id]
+        }
         // model context limit + compaction reserve, for the guard (DESIGN.md §6.7)
-        const limit = createMemo(() => {
-          const last = [...(api.state.session.messages(props.session_id) as unknown as { role: string; providerID?: string; modelID?: string }[])].reverse().find((m) => m.role === "assistant")
-          if (!last?.providerID || !last.modelID) return undefined
-          const provider = api.state.provider.find((p) => p.id === last.providerID)
-          const model = provider?.models[last.modelID] as { limit?: { context?: number; output?: number } } | undefined
-          return model?.limit?.context
-        })
+        const limit = createMemo(() => modelContextLimit(api, props.session_id))
         const reserve = () => (api.state.config as { compaction?: { reserved?: number } }).compaction?.reserved ?? 16_384
         // trend + attribution: an effect compares each new size with the previous one
         // (side effects and closure state stay out of the memo graph)
@@ -297,6 +344,21 @@ const tui: TuiPlugin = async (api, rawOptions) => {
         let prevParts = new Map<string, number>()
         let redNudged = false
         let guardNudged = false
+        // the slot is reused across sessions: carrying this over reports a bogus trend and
+        // swallows the first red/guard nudge of the session we just moved to
+        createEffect(
+          on(
+            () => props.session_id,
+            () => {
+              prevTokens = 0
+              prevParts = new Map()
+              redNudged = false
+              guardNudged = false
+              setTrend("")
+            },
+            { defer: true },
+          ),
+        )
         const partSizes = createMemo(() => {
           const parts = new Map<string, { len: number; key: string }>()
           for (const m of api.state.session.messages(props.session_id)) {
@@ -334,7 +396,7 @@ const tui: TuiPlugin = async (api, rawOptions) => {
         })
         return (
           <text fg={t[BAND_COLOR[band()]]}>
-            {branch() ? `⎇ ${branch()!.name ?? "branch"} · ` : ""}ctx {formatK(size().tokens)}{limit() ? `/${formatK(limit()!)}` : ""} · {band()}{trend()}
+            {branch() ? `⎇ ${branchLabel(api, props.session_id, branch()!.name, 24)} · ` : ""}ctx {formatK(size().tokens)}{limit() ? `/${formatK(limit()!)}` : ""} · {band()}{trend()}
           </text>
         )
       },

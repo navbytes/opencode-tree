@@ -135,6 +135,13 @@ describe("applyCrops — turn mode", () => {
     expect(messages).toHaveLength(4) // unchanged
   })
 
+  test("never drops a message after the last user message either", () => {
+    const messages = [...turnFixture(), { info: { id: "m5", role: "assistant" as const, sessionID: "s1" }, parts: [{ id: "m5p1", type: "text", text: "on it" }] }]
+    const crop: CropSpec = { mode: "turn", anchorMessageID: "m5", targets: [{ messageID: "m5", estTokens: 100, sha8: "cafebabe" }] }
+    applyCrops(messages, [crop])
+    expect(messages).toHaveLength(5) // unchanged
+  })
+
   test("is idempotent", () => {
     const messages = turnFixture()
     const crop: CropSpec = { mode: "turn", anchorMessageID: "m1", targets: [{ messageID: "m1", estTokens: 12000, sha8: "deadbeef" }] }

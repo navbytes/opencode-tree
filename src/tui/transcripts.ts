@@ -35,19 +35,21 @@ export function liveTranscript(api: TuiPluginApi, sessionID: string): Transcript
   }
 }
 
-/** One-shot transcript of any session through the SDK (paged). */
+/** One-shot transcript of any session through the SDK. `limit` returns the *last* N and the
+ *  `before` cursor is opaque (raw ids are rejected), so the whole session is fetched at once. */
 export async function fetchTranscript(api: TuiPluginApi, sessionID: string, directory: string): Promise<Transcript> {
   const session = await api.client.session.get({ sessionID, directory }).catch(() => undefined)
   if (!session?.data) return { sessionID, title: sessionID, status: "deleted", messages: [] }
-  const all: TranscriptMessage[] = []
-  let before: string | undefined
-  for (let page = 0; page < 50; page++) {
-    const res = await api.client.session.messages({ sessionID, directory, limit: 200, before })
-    const items = ((res.data as unknown as { info: AnyMessage; parts: AnyPart[] }[] | undefined) ?? []).map((m) => toTranscriptMessage(m.info, m.parts))
-    if (items.length === 0) break
-    all.unshift(...items)
-    if (items.length < 200) break
-    before = items[0]!.id
-  }
-  return { sessionID, title: (session.data as { title?: string }).title ?? sessionID, status: "available", messages: all }
+  const res = await api.client.session.messages({ sessionID, directory })
+  const messages = ((res.data as unknown as { info: AnyMessage; parts: AnyPart[] }[] | undefined) ?? []).map((m) => toTranscriptMessage(m.info, m.parts))
+  return { sessionID, title: (session.data as { title?: string }).title ?? sessionID, status: "available", messages }
+}
+
+/** Context window of the model that answered last, for the gauge and the Input lane scale. */
+export function modelContextLimit(api: TuiPluginApi, sessionID: string): number | undefined {
+  const last = [...(api.state.session.messages(sessionID) as unknown as { role: string; providerID?: string; modelID?: string }[])].reverse().find((m) => m.role === "assistant")
+  if (!last?.providerID || !last.modelID) return undefined
+  const provider = api.state.provider.find((p) => p.id === last.providerID)
+  const model = provider?.models[last.modelID] as { limit?: { context?: number } } | undefined
+  return model?.limit?.context
 }

@@ -23,7 +23,8 @@ export type JumpPlan =
 /**
  * Plan the jump for a selected row (DESIGN.md §6.2), against the *unfiltered*
  * transcripts so search/filters never change what a jump does:
- * - a **branch row** → switch to that branch's session (same as its tip);
+ * - a **branch row** → switch to that branch's session (same as its tip), or a noop on the
+ *   marker row of the session you are already in;
  * - a **turn/step row on the last message of a non-current session** → switch to it
  *   (no fork) — Pi's "move the leaf to an existing leaf";
  * - a **turn row** elsewhere → fork at that user message, prefilled with its text;
@@ -31,7 +32,7 @@ export type JumpPlan =
  * - the **last message of the current session** → noop, "already here".
  */
 export function planJump(row: Row, ctx: { transcripts: Record<string, Transcript>; currentSessionID: string }): JumpPlan {
-  if (row.kind === "branch") return { kind: "switch", sessionID: row.sessionID }
+  if (row.kind === "branch") return row.sessionID === ctx.currentSessionID ? { kind: "noop", reason: "you are here" } : { kind: "switch", sessionID: row.sessionID }
   const tr = ctx.transcripts[row.sessionID]
   if (!tr) return { kind: "noop", reason: "that session is not loaded" }
   const idx = tr.messages.findIndex((m) => m.id === row.messageID)

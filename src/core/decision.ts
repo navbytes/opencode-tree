@@ -25,8 +25,19 @@ export function decisionTemplate(branchName: string, model?: string, date = new 
 `
 }
 
-/** Serialise the branch's own messages (after its anchor) for the drafting model. */
-export function branchTranscriptText(transcript: Transcript, anchorIndex: number, toolChars = 2000): string {
+/**
+ * Serialise the branch's own messages (after its anchor) for the drafting model.
+ * The anchor id lives in the *parent* (fork copies the shared prefix with fresh ids), so
+ * it is resolved against `parentMessageIDs` and applied positionally. Omitting
+ * `messageID` asks for the whole transcript; an id the parent no longer has is an error,
+ * never a silent "include the shared prefix too".
+ */
+export function branchTranscriptText(transcript: Transcript, anchor: { messageID?: string; parentMessageIDs: string[] }, toolChars = 2000): string {
+  let anchorIndex = -1
+  if (anchor.messageID) {
+    anchorIndex = anchor.parentMessageIDs.indexOf(anchor.messageID)
+    if (anchorIndex === -1) throw new Error(`anchor message ${anchor.messageID} is no longer in the parent session — cannot tell this branch's own turns from the shared prefix`)
+  }
   const msgs = transcript.messages.slice(anchorIndex + 1)
   return msgs
     .map((m) => messageText(m, toolChars))
@@ -76,5 +87,11 @@ export function openSiblings(state: TreeState, sessionID: string): string[] {
 /** Markdown export of every decision on a session's path (`/decisions --export`). */
 export function exportDecisions(records: { branchName: string; text: string; sessionID: string; at?: number }[]): string {
   if (records.length === 0) return "# Decisions\n\n_(none yet)_\n"
-  return `# Decisions\n\n${records.map((r) => r.text.replace(/^◆ /, "")).join("\n\n---\n\n")}\n`
+  const one = (r: { branchName: string; text: string; sessionID: string; at?: number }) => {
+    const when = r.at ? new Date(r.at).toISOString() : "date unknown"
+    // the heading already names the branch, so the record's own "## Decision: <name>" goes
+    const body = r.text.replace(/^◆ /, "").replace(/^## Decision:[^\n]*\n?/, "").trim()
+    return `## ⎇ ${r.branchName} · ${when}\n_session ${r.sessionID}_\n\n${body}`
+  }
+  return `# Decisions\n\n${records.map(one).join("\n\n---\n\n")}\n`
 }

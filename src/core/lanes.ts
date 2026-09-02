@@ -12,6 +12,8 @@ export type LaneMode = "turns" | "calls" | "duration"
 export type LaneColumn = {
   /** identifies what the column represents, for cursor mirroring */
   messageID: string
+  /** the column's user message, so the cursor also mirrors ● rows (turns/duration mode) */
+  userMessageID?: string
   partID?: string
   turn: number
   input: number
@@ -24,11 +26,18 @@ export type LaneColumn = {
 
 export type Lanes = { mode: LaneMode; columns: LaneColumn[] }
 
-function turnsOf(messages: TranscriptMessage[]): { user: TranscriptMessage; assistants: TranscriptMessage[]; index: number }[] {
-  const out: { user: TranscriptMessage; assistants: TranscriptMessage[]; index: number }[] = []
+type Turn = { user?: TranscriptMessage; assistants: TranscriptMessage[]; index: number }
+
+function turnsOf(messages: TranscriptMessage[]): Turn[] {
+  const out: Turn[] = []
+  let index = 0
   for (const m of messages) {
-    if (m.role === "user") out.push({ user: m, assistants: [], index: out.length + 1 })
-    else out[out.length - 1]?.assistants.push(m)
+    if (m.role === "user") out.push({ user: m, assistants: [], index: ++index })
+    else {
+      // after a compaction the transcript opens with an assistant summary: it gets turn 0
+      if (out.length === 0) out.push({ assistants: [], index: 0 })
+      out[out.length - 1]!.assistants.push(m)
+    }
   }
   return out
 }
@@ -49,12 +58,12 @@ export function buildLanes(transcript: Transcript, mode: LaneMode): Lanes {
           any = true
           const out = p.state?.output ?? ""
           const t = p.state?.time
-          columns.push({ messageID: m.id, partID: p.id, turn: turn.index, input: m.tokens?.input ?? 0, output: 0, tool: estimateTokens(out), toolError: p.state?.status === "error", ms: t?.start !== undefined && t?.end !== undefined ? t.end - t.start : 0 })
+          columns.push({ messageID: m.id, userMessageID: turn.user?.id, partID: p.id, turn: turn.index, input: m.tokens?.input ?? 0, output: 0, tool: estimateTokens(out), toolError: p.state?.status === "error", ms: t?.start !== undefined && t?.end !== undefined ? t.end - t.start : 0 })
         }
       }
       if (!any) {
         const last = turn.assistants.at(-1)
-        columns.push({ messageID: last?.id ?? turn.user.id, turn: turn.index, input: last?.tokens?.input ?? 0, output: last?.tokens?.output ?? 0, tool: 0, toolError: false, ms: last ? spanOf(last) : 0 })
+        columns.push({ messageID: last?.id ?? turn.user?.id ?? "", userMessageID: turn.user?.id, turn: turn.index, input: last?.tokens?.input ?? 0, output: last?.tokens?.output ?? 0, tool: 0, toolError: false, ms: last ? spanOf(last) : 0 })
       }
       continue
     }
@@ -73,17 +82,19 @@ export function buildLanes(transcript: Transcript, mode: LaneMode): Lanes {
         if (p.state?.status === "error") toolError = true
       }
     }
-    columns.push({ messageID: last?.id ?? turn.user.id, turn: turn.index, input: last?.tokens?.input ?? 0, output, tool, toolError, ms })
+    columns.push({ messageID: last?.id ?? turn.user?.id ?? "", userMessageID: turn.user?.id, turn: turn.index, input: last?.tokens?.input ?? 0, output, tool, toolError, ms })
   }
   return { mode, columns }
 }
 
 const BLOCKS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
 
-export function sparkline(values: number[], width: number): string {
+/** `scale` (the model's context limit for the Input lane) fixes the reference height, so a
+ *  two-message session no longer draws a full bar next to `ctx 100 · low`. */
+export function sparkline(values: number[], width: number, scale?: number): string {
   if (values.length === 0 || width <= 0) return ""
   const cells = fitColumns(values, width)
-  const max = Math.max(1, ...cells)
+  const max = Math.max(1, scale ?? 0, ...cells)
   return cells.map((v) => (v <= 0 ? " " : BLOCKS[Math.min(7, Math.floor((v / max) * 7.999))]!)).join("")
 }
 
@@ -107,22 +118,24 @@ export function fitColumns(values: number[], width: number): number[] {
 }
 
 /** Duration mode: repeat each column proportionally to its wall-clock share. */
-export function durationWeighted(lanes: Lanes, width: number): { input: number[]; output: number[]; tool: number[]; columnAt: (cell: number) => number } {
+export function durationWeighted(lanes: Lanes, width: number): { input: number[]; output: number[]; tool: number[]; toolError: boolean[]; columnAt: (cell: number) => number } {
   const total = lanes.columns.reduce((s, c) => s + Math.max(1, c.ms), 0) || 1
   const input: number[] = []
   const output: number[] = []
   const tool: number[] = []
+  const toolError: boolean[] = []
   const owner: number[] = []
   lanes.columns.forEach((c, i) => {
     const cells = Math.max(1, Math.round((Math.max(1, c.ms) / total) * width))
     for (let k = 0; k < cells; k++) {
       input.push(c.input)
       output.push(c.output)
-      tool.push(c.toolError ? -1 : c.tool)
+      tool.push(c.tool)
+      toolError.push(c.toolError)
       owner.push(i)
     }
   })
-  return { input, output, tool, columnAt: (cell) => owner[Math.min(owner.length - 1, Math.max(0, cell))] ?? 0 }
+  return { input, output, tool, toolError, columnAt: (cell) => owner[Math.min(owner.length - 1, Math.max(0, cell))] ?? 0 }
 }
 
 /** Index of the column that contains a given message/part (for the cursor marker). */
@@ -131,6 +144,6 @@ export function columnFor(lanes: Lanes, messageID: string, partID?: string): num
     const i = lanes.columns.findIndex((c) => c.partID === partID)
     if (i >= 0) return i
   }
-  const i = lanes.columns.findIndex((c) => c.messageID === messageID)
+  const i = lanes.columns.findIndex((c) => c.messageID === messageID || c.userMessageID === messageID)
   return i >= 0 ? i : -1
 }

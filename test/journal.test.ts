@@ -111,6 +111,41 @@ describe("foldJournal", () => {
     expect(state.sessions["s_branch"]?.status).toBe("squashed") // unrelated to forgotten
   })
 
+  test("a second branch.opened for an already-open branch is ignored", () => {
+    // both halves adopt native forks independently and may both journal the same fork
+    const doubled: JournalEntry[] = [
+      ...fixture.slice(0, 2),
+      {
+        v: 1,
+        id: "e_dup",
+        ts: 1005,
+        type: "branch.opened",
+        actor: "server",
+        data: { sessionID: "s_branch", parentSessionID: "s_root", anchorMessageID: "m_99", kind: "native" },
+      },
+    ]
+    const branch = foldJournal(doubled).sessions["s_branch"]
+    expect(branch?.anchorMessageID).toBe("m_10")
+    expect(branch?.kind).toBe("explicit")
+    expect(branch?.name).toBe("fix-flaky-test")
+  })
+
+  test("re-opening a closed branch still folds", () => {
+    const reopened: JournalEntry[] = [
+      ...fixture,
+      {
+        v: 1,
+        id: "e_7",
+        ts: 1006,
+        type: "branch.opened",
+        actor: "tui",
+        data: { sessionID: "s_branch", parentSessionID: "s_root", anchorMessageID: "m_10", kind: "explicit" },
+      },
+    ]
+    const state = foldJournal(reopened)
+    expect(state.sessions["s_branch"]?.status).toBe("open")
+  })
+
   test("parseJournal skips malformed lines but keeps valid ones", () => {
     const contents = [line(fixture[0]!), "garbage", "", line(fixture[1]!)].join("\n")
     const entries = parseJournal(contents)

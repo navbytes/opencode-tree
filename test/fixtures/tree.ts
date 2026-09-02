@@ -67,3 +67,31 @@ export function buildFixture(): { state: TreeState; transcripts: Record<string, 
   }
   return { state, transcripts, anchor }
 }
+
+export const EARLY = "ses_early"
+export const LATE = "ses_late"
+
+/**
+ * The same trunk with two branches forked at *different* points: `early` at a2 and
+ * `late` at a3. Viewed from `early`, neither `late` nor the trunk's own tail (m3/a3)
+ * is on the rendered path — they only appear in the "elsewhere" group.
+ */
+export function buildOffPathFixture(): { state: TreeState; transcripts: Record<string, Transcript> } {
+  const trunk = buildFixture().transcripts[TRUNK]!.messages
+  const earlyMsgs: TranscriptMessage[] = [...copyPrefix(trunk.slice(0, 4), "e"), user("em1", "try the early idea"), assistant("ea1", { text: "Early idea done.", input: 2600, output: 20 })]
+  const lateMsgs: TranscriptMessage[] = [...copyPrefix(trunk.slice(0, 6), "l"), user("lm1", "try the late idea"), assistant("la1", { text: "Late idea done.", input: 3200, output: 20 })]
+
+  const entries: JournalEntry[] = [
+    { v: 1, id: "e1", ts: 1, type: "tree.created", actor: "tui", data: { rootSessionID: TRUNK } },
+    { v: 1, id: "e2", ts: 2, type: "branch.opened", actor: "tui", data: { sessionID: EARLY, parentSessionID: TRUNK, anchorMessageID: "a2", name: "early", kind: "explicit" } },
+    { v: 1, id: "e3", ts: 3, type: "branch.opened", actor: "tui", data: { sessionID: LATE, parentSessionID: TRUNK, anchorMessageID: "a3", name: "late", kind: "explicit" } },
+  ]
+  return {
+    state: foldJournal(entries, "t_offpath"),
+    transcripts: {
+      [TRUNK]: { sessionID: TRUNK, title: "Fix flaky test", status: "available", messages: trunk },
+      [EARLY]: { sessionID: EARLY, title: "⎇ early", status: "available", messages: earlyMsgs },
+      [LATE]: { sessionID: LATE, title: "⎇ late", status: "available", messages: lateMsgs },
+    },
+  }
+}

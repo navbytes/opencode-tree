@@ -16,7 +16,7 @@ export const TreeCreatedData = z.object({
 })
 export type TreeCreatedData = z.infer<typeof TreeCreatedData>
 
-export const BranchKind = z.enum(["explicit", "jump", "redo"])
+export const BranchKind = z.enum(["explicit", "jump", "redo", "native"])
 export type BranchKind = z.infer<typeof BranchKind>
 
 export const BranchOpenedData = z.object({
@@ -242,6 +242,9 @@ export function foldJournal(entries: JournalEntry[], treeId = "default"): TreeSt
       case "branch.opened": {
         const d = entry.data
         const previous = state.sessions[d.sessionID]
+        // both halves adopt native forks independently, so the same branch can be opened
+        // twice; the first entry wins (re-opening a *closed* branch still folds)
+        if (previous?.status === "open") break
         if (previous?.decisionMessageID) {
           const decision = state.decisions[previous.decisionMessageID]
           if (decision) decision.hidden = true

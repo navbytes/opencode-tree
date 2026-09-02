@@ -40,6 +40,30 @@ describe("crop planning", () => {
     const untouched = msgs.find((m) => m.info.id === cands[1]!.messageID)!.parts.find((p) => p.type === "tool")!
     expect(untouched.state!.output!.startsWith("[cropped")).toBe(false)
   })
+  test("results after a compaction summary are still candidates (turn 0)", () => {
+    const compacted = { ...open, messages: [{ ...open.messages[1]!, summary: true }, ...open.messages.slice(4)] }
+    expect(resultCandidates(compacted).map((c) => [c.turn, c.tool])).toEqual([[0, "bash"], [1, "bash"]])
+    expect(turnCandidates(compacted).map((t) => t.turn)).toEqual([1, 2]) // the summary turn has no user message to splice
+  })
+  test("the turn stub's handle is the candidate's whole-turn sha8", () => {
+    const t = turnCandidates(open)[2]!
+    const plan = planTurnCrops(OPEN, [t])[0]!
+    expect(plan.targets[0]!.sha8).toBe(t.sha8)
+    expect(t.sha8).not.toBe(sha8(open.messages[4]!.parts.map((p) => p.text ?? "").join("\n")))
+  })
+  test("planTurnCrops refuses the current turn", () => {
+    const turns = turnCandidates(open)
+    expect(planTurnCrops(OPEN, [turns[3]!, turns[0]!]).map((p) => p.anchorMessageID)).toEqual([turns[0]!.anchorMessageID])
+  })
+  test("a fat result that only exists in the current turn plans nothing (the server skips, never throws)", () => {
+    const currentTurnOnly = { ...open, messages: open.messages.slice(4, 6) } // om1 + its 20k bash result
+    const cands = resultCandidates(currentTurnOnly)
+    expect(cands.map((c) => c.protections)).toEqual([["current-turn", "latest-per-tool"]])
+    expect(autoMark(cands, { minTokens: 1000, olderThanTurns: 0, keep: [] })).toEqual([])
+    expect(topCandidate(cands, true)).toBeUndefined() // --force waives latest-per-tool, never the current turn
+    expect(planResultCrop(OPEN, [])).toBeUndefined()
+    expect(planTurnCrops(OPEN, turnCandidates(currentTurnOnly))).toEqual([])
+  })
   test("turn candidates: last turn protected; planTurnCrops drops a whole turn", () => {
     const turns = turnCandidates(open)
     expect(turns.map((t) => [t.turn, t.steps, t.protections])).toEqual([[1, 2, []], [2, 2, []], [3, 2, []], [4, 2, ["current-turn"]]])

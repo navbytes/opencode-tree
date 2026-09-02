@@ -16,14 +16,6 @@ export function moveSelection(rows: Row[], index: number, delta: number): number
   return next
 }
 
-export function firstIndex(rows: Row[]): number {
-  return rows.length ? 0 : -1
-}
-
-export function lastIndex(rows: Row[]): number {
-  return rows.length ? rows.length - 1 : -1
-}
-
 /** The next/previous `branch` row from `index` in direction `dir` (DESIGN.md §7.2's
  *  gutter jump). Stays put if there is no branch row in that direction. */
 export function nextBranchIndex(rows: Row[], index: number, dir: 1 | -1): number {

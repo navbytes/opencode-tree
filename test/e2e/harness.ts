@@ -186,8 +186,11 @@ export async function createProject(opts: CreateProjectOptions): Promise<{ dir: 
   }
 }
 
+/** A plugin entry as OpenCode accepts it: a path/package, optionally with its options object. */
+export type PluginSpec = string | [string, Record<string, unknown>]
+
 /** Merges plugin specs into the project's opencode.json ("plugin": [...]) and/or .opencode/tui.json. */
-export async function installPlugins(opts: { projectDir: string; server?: string[]; tui?: string[] }): Promise<void> {
+export async function installPlugins(opts: { projectDir: string; server?: PluginSpec[]; tui?: PluginSpec[] }): Promise<void> {
   if (opts.server && opts.server.length > 0) {
     const configPath = path.join(opts.projectDir, "opencode.json")
     const config = JSON.parse(readFileSync(configPath, "utf8"))
@@ -320,6 +323,10 @@ export async function runTuiScreens(opts: RunTuiOptions): Promise<{ text: string
   const bin = await ensureOpencode()
   const outDir = await mkdtemp(path.join(tmpdir(), "ctree-e2e-pty-"))
   const outFile = path.join(outDir, "pty.out")
+  // Same sandbox as startServer: without it the TUI reads the developer's real
+  // ~/.local/state/opencode/kv.json, where a leftover `ctree.filter` silently changes
+  // which rows a scripted keystroke lands on.
+  const xdgRoot = await mkdtemp(path.join(tmpdir(), "ctree-e2e-tui-xdg-"))
 
   const args = [
     path.join(HARNESS_DIR, "pty-run.py"),
@@ -342,7 +349,18 @@ export async function runTuiScreens(opts: RunTuiOptions): Promise<{ text: string
   const proc = Bun.spawn({
     cmd: ["python3", ...args],
     cwd: opts.projectDir,
-    env: { ...process.env, ...opts.env },
+    env: {
+      ...process.env,
+      XDG_DATA_HOME: path.join(xdgRoot, "data"),
+      XDG_CONFIG_HOME: path.join(xdgRoot, "config"),
+      XDG_STATE_HOME: path.join(xdgRoot, "state"),
+      XDG_CACHE_HOME: path.join(xdgRoot, "cache"),
+      OPENCODE_DISABLE_AUTOUPDATE: "1",
+      OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
+      OPENCODE_DISABLE_PRUNE: "1",
+      ...opts.env,
+      ...(opts.env?.EDITOR && !opts.env?.VISUAL ? { VISUAL: opts.env.EDITOR } : {}),
+    },
     stdio: ["ignore", "pipe", "pipe"],
   })
   await proc.exited
@@ -357,5 +375,6 @@ export async function runTuiScreens(opts: RunTuiOptions): Promise<{ text: string
       return { label: s.slice(0, nl), screen: s.slice(nl + 7) }
     })
   await rm(outDir, { recursive: true, force: true }).catch(() => {})
+  await rm(xdgRoot, { recursive: true, force: true }).catch(() => {})
   return { text, screens }
 }

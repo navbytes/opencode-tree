@@ -24,14 +24,22 @@ describe("bandFor", () => {
 })
 
 describe("contextSizeOf", () => {
-  test("uses the last assistant turn's real tokens.input when nothing is newer", () => {
+  test("uses the last assistant turn's real tokens.input, plus its own output", () => {
     const messages: MinimalMessage[] = [
       { info: { role: "user" }, parts: [{ type: "text", text: "hi" }] },
-      { info: { role: "assistant", tokens: { input: 4600 } }, parts: [{ type: "text", text: "hello" }] },
+      { info: { role: "assistant", tokens: { input: 4600 } }, parts: [{ type: "text", text: "a".repeat(400) }] }, // +100
     ]
     const size = contextSizeOf(messages)
-    expect(size.tokens).toBe(4600)
-    expect(size.estimated).toBe(false)
+    expect(size.tokens).toBe(4700)
+    expect(size.estimated).toBe(true)
+  })
+
+  test("an empty last assistant turn is the real figure, unestimated", () => {
+    const messages: MinimalMessage[] = [
+      { info: { role: "user" }, parts: [{ type: "text", text: "hi" }] },
+      { info: { role: "assistant", tokens: { input: 4600 } }, parts: [] },
+    ]
+    expect(contextSizeOf(messages)).toEqual({ tokens: 4600, estimated: false })
   })
 
   test("adds chars/4 for parts newer than the last assistant turn", () => {

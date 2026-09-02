@@ -14,7 +14,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { cp, mkdir } from "node:fs/promises"
 import path from "node:path"
-import { readFileSync, readdirSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { createProject, startMock, startServer, TEMPLATE_PROJECT_DIR, type StartedMock, type StartedServer, REPO_ROOT, installPlugins } from "./harness.js"
 
 const e2e = process.env.CTREE_E2E === "1"
@@ -41,7 +41,7 @@ describe.skipIf(!e2e)("server e2e: prompt/model/metadata/fork/noReply", () => {
     cleanupProject = project.cleanup
     await installSpikePlugin(project.dir)
     server = await startServer({ projectDir: project.dir, env: { SPIKE_LOG: path.join(project.dir, "spike.log") } })
-  }, 60_000)
+  })
 
   afterAll(async () => {
     await server?.stop()
@@ -182,7 +182,7 @@ describe.skipIf(!e2e)("server e2e: experimental.chat.messages.transform", () => 
     cleanupProject = project.cleanup
     await installSpikePlugin(project.dir)
     server = await startServer({ projectDir: project.dir, env: { SPIKE_LOG: path.join(project.dir, "spike.log") } })
-  }, 60_000)
+  })
 
   afterAll(async () => {
     await server?.stop()
@@ -230,7 +230,7 @@ describe.skipIf(!e2e)("server e2e: built plugin headless /ctree commands", () =>
     dir = project.dir
     await installPlugins({ projectDir: project.dir, server: [path.join(REPO_ROOT, "dist", "server.js")] })
     server = await startServer({ projectDir: project.dir })
-  }, 120_000)
+  })
 
   afterAll(async () => {
     await server?.stop()
@@ -272,5 +272,104 @@ describe.skipIf(!e2e)("server e2e: built plugin headless /ctree commands", () =>
     unwrap(await server.client.session.prompt({ path: { id: session.id }, query: { directory: server.dir }, body: { parts: [{ type: "text", text: "after undo" }] } }))
     last = mock.requests().at(-1)!.body.messages as { role: string; content: unknown }[]
     expect(last.filter((m) => m.role === "tool").every((m) => !String(m.content).startsWith("[cropped"))).toBe(true)
+  }, 180_000)
+
+  test("/ctree branch mirrors metadata; merge --discard closes it; decisions --export writes a file", async () => {
+    const session = unwrap(await server.client.session.create({ query: { directory: server.dir }, body: { title: "headless-branch" } }))
+    unwrap(await server.client.session.prompt({ path: { id: session.id }, query: { directory: server.dir }, body: { parts: [{ type: "text", text: "seed turn" }] } }))
+
+    unwrap(await server.client.session.command({ path: { id: session.id }, query: { directory: server.dir }, body: { command: "ctree", arguments: "branch side-quest mock/mock-b" } }))
+    const listed = unwrap(await server.client.session.list({ query: { directory: server.dir } }))
+    const arr = (Array.isArray(listed) ? listed : Object.values(listed)) as { id: string; title?: string; metadata?: any }[]
+    const fork = arr.find((s) => s.title === "⎇ side-quest")
+    expect(fork).toBeTruthy()
+
+    const forkMeta = (fork as any).metadata?.ctree
+    expect(forkMeta?.parentSessionID).toBe(session.id)
+    expect(forkMeta?.name).toBe("side-quest")
+    expect(forkMeta?.status).toBe("open")
+
+    // the branch model recorded by /ctree branch is what chat.message routes the branch to
+    mock.clearRequests()
+    unwrap(await server.client.session.prompt({ path: { id: fork!.id }, query: { directory: server.dir }, body: { parts: [{ type: "text", text: "which model" }] } }))
+    expect(mock.requests().at(-1)!.model).toBe("mock-b")
+
+    unwrap(await server.client.session.command({ path: { id: fork!.id }, query: { directory: server.dir }, body: { command: "ctree", arguments: "merge --discard dead end" } }))
+    const journalDir = path.join(server.dir, ".opencode", "context-tree")
+    const journal = readdirSync(journalDir).map((f) => readFileSync(path.join(journalDir, f), "utf8")).join("")
+    expect(journal).toContain('"type":"branch.closed"')
+    expect(journal).toContain('"status":"rejected"')
+    expect(journal).toContain('"note":"dead end"')
+    const refetched = unwrap(await server.client.session.get({ path: { id: fork!.id }, query: { directory: server.dir } })) as any
+    expect(refetched.metadata?.ctree?.status).toBe("rejected")
+
+    const outPath = path.join(server.dir, "ctree-exported.md")
+    unwrap(await server.client.session.command({ path: { id: session.id }, query: { directory: server.dir }, body: { command: "ctree", arguments: `decisions --export ${outPath}` } }))
+    expect(readFileSync(outPath, "utf8")).toContain("# Decisions")
+
+    // no path -> the documented default, relative to the project directory
+    unwrap(await server.client.session.command({ path: { id: session.id }, query: { directory: server.dir }, body: { command: "ctree", arguments: "decisions --export" } }))
+    expect(readFileSync(path.join(server.dir, "ctree-decisions.md"), "utf8")).toContain("# Decisions")
+  }, 180_000)
+
+  test("a native session.fork (no plugin command) is adopted into the tree", async () => {
+    const session = unwrap(await server.client.session.create({ query: { directory: server.dir }, body: { title: "native-fork" } }))
+    unwrap(await server.client.session.prompt({ path: { id: session.id }, query: { directory: server.dir }, body: { parts: [{ type: "text", text: "seed turn" }] } }))
+
+    const fork = unwrap(await server.client.session.fork({ path: { id: session.id }, query: { directory: server.dir } }))
+    expect(fork.title).toBe("native-fork (fork #1)")
+    // the messages are copied after session.created fires; the plugin retries for ~3 s
+    await new Promise((r) => setTimeout(r, 3_000))
+
+    mock.clearRequests()
+    unwrap(await server.client.session.command({ path: { id: session.id }, query: { directory: server.dir }, body: { command: "ctree", arguments: "status" } }))
+    const last = mock.requests().at(-1)!.body.messages as { role: string; content: unknown }[]
+    expect(String(last.filter((m) => m.role === "user").at(-1)!.content)).toContain("1 branch(es)")
+
+    const journalDir = path.join(server.dir, ".opencode", "context-tree")
+    const journal = readdirSync(journalDir).map((f) => readFileSync(path.join(journalDir, f), "utf8")).join("")
+    expect(journal).toContain('"kind":"native"')
+    expect(journal).toContain(`"sessionID":"${fork.id}"`)
+  }, 180_000)
+})
+
+describe.skipIf(!e2e)('server e2e: storage "global" option', () => {
+  let mock: StartedMock
+  let server: StartedServer
+  let cleanupProject: () => Promise<void>
+  let dir: string
+
+  beforeAll(async () => {
+    const build = Bun.spawnSync({ cmd: ["bun", "run", "scripts/build.ts"], cwd: REPO_ROOT, stdio: ["ignore", "pipe", "pipe"] })
+    if (build.exitCode !== 0) throw new Error(`build failed: ${build.stderr.toString()}`)
+    mock = await startMock({ tool: false })
+    const project = await createProject({ mockPort: mock.port })
+    cleanupProject = project.cleanup
+    dir = project.dir
+    await installPlugins({ projectDir: project.dir, server: [[path.join(REPO_ROOT, "dist", "server.js"), { storage: "global" }]] })
+    server = await startServer({ projectDir: project.dir })
+  })
+
+  afterAll(async () => {
+    await server?.stop()
+    await mock?.stop()
+    await cleanupProject?.()
+  })
+
+  test("the server writes and reads the journal in OpenCode's state dir, not the worktree", async () => {
+    const session = unwrap(await server.client.session.create({ query: { directory: server.dir }, body: { title: "global-storage" } }))
+    unwrap(await server.client.session.prompt({ path: { id: session.id }, query: { directory: server.dir }, body: { parts: [{ type: "text", text: "seed turn" }] } }))
+    unwrap(await server.client.session.command({ path: { id: session.id }, query: { directory: server.dir }, body: { command: "ctree", arguments: "branch away" } }))
+
+    const state = unwrap(await server.client.path.get({ query: { directory: server.dir } })).state
+    const globalDir = path.join(state, "plugins", "opencode-context-tree")
+    expect(readdirSync(globalDir).some((f) => f.endsWith(".jsonl"))).toBe(true)
+    expect(existsSync(path.join(dir, ".opencode", "context-tree"))).toBe(false)
+
+    // and the same store is what the hooks read back
+    mock.clearRequests()
+    unwrap(await server.client.session.command({ path: { id: session.id }, query: { directory: server.dir }, body: { command: "ctree", arguments: "status" } }))
+    const last = mock.requests().at(-1)!.body.messages as { role: string; content: unknown }[]
+    expect(String(last.filter((m) => m.role === "user").at(-1)!.content)).toContain("1 branch(es)")
   }, 180_000)
 })

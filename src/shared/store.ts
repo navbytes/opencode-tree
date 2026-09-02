@@ -20,23 +20,31 @@ export type JournalStoreOptions = {
 }
 
 type CacheEntry = {
-  mtimeMs: number
+  key: string
   entries: JournalEntry[]
   state: TreeState
 }
 
 const REGISTRY_FILE = "registry.json"
+/** Past this, a lock is assumed to belong to a crashed writer: it is removed and taken over. */
+const LOCK_TIMEOUT_MS = 250
 
 export class JournalStore {
   private readonly baseDir: string
   private readonly cache = new Map<string, CacheEntry>()
-  private registryCache: { mtimeMs: number; data: Record<string, string> } | undefined
+  private registryCache: { key: string; data: Record<string, string> } | undefined
 
   constructor(options: JournalStoreOptions) {
-    this.baseDir =
-      options.mode === "global"
-        ? path.join(options.stateDir ?? defaultStateDir(), "plugins", "opencode-context-tree")
-        : path.join(options.worktree, ".opencode", "context-tree")
+    // OpenCode reports worktree "/" for directories outside git; never write at the fs root
+    const local = options.mode !== "global" && !isFsRoot(options.worktree)
+    this.baseDir = local
+      ? path.join(options.worktree, ".opencode", "context-tree")
+      : path.join(options.stateDir ?? defaultStateDir(), "plugins", "opencode-context-tree")
+  }
+
+  /** Where this store keeps its files (for messages and tests). */
+  get dir(): string {
+    return this.baseDir
   }
 
   private ensureDir(): void {
@@ -54,21 +62,21 @@ export class JournalStore {
     return path.join(this.baseDir, REGISTRY_FILE)
   }
 
-  /** sessionID -> treeId, read fresh only when the registry file's mtime has changed. */
+  /** sessionID -> treeId, read fresh only when the registry file has changed. */
   readRegistry(): Record<string, string> {
     const registryPath = this.registryPath()
-    if (!fs.existsSync(registryPath)) return {}
-    const mtimeMs = fs.statSync(registryPath).mtimeMs
-    if (this.registryCache && this.registryCache.mtimeMs === mtimeMs) return this.registryCache.data
-    let data: Record<string, string> = {}
+    const key = statKey(registryPath)
+    // unreadable (removed, EACCES) must never take a hook down: keep the last good copy
+    if (key === undefined) return this.registryCache?.data ?? {}
+    if (this.registryCache && this.registryCache.key === key) return this.registryCache.data
+    let data: Record<string, string> = this.registryCache?.data ?? {}
     try {
       const parsed = JSON.parse(fs.readFileSync(registryPath, "utf8")) as unknown
       if (parsed && typeof parsed === "object") data = Object.fromEntries(Object.entries(parsed as Record<string, unknown>).filter(([, v]) => typeof v === "string")) as Record<string, string>
     } catch {
-      // a truncated/corrupt registry must never take the hooks down; keep the last good copy
-      data = this.registryCache?.data ?? {}
+      // a truncated/corrupt registry keeps the last good copy too
     }
-    this.registryCache = { mtimeMs, data }
+    this.registryCache = { key, data }
     return data
   }
 
@@ -76,36 +84,87 @@ export class JournalStore {
     return this.readRegistry()[sessionID]
   }
 
-  /** Registers a session under a tree, creating the tree if this is its first session. */
-  registerSession(sessionID: string, treeId: string): void {
-    this.ensureDir()
-    const registry = { ...this.readRegistry() }
-    if (registry[sessionID] === treeId) return
-    registry[sessionID] = treeId
+  /**
+   * Serialize the registry's read-modify-write against the other plugin half (DESIGN.md §8).
+   * Blocking is fine: the critical section is one small write, and a crashed holder's lock
+   * is broken rather than obeyed.
+   */
+  private withRegistryLock<T>(fn: () => T): T {
+    const lockPath = `${this.registryPath()}.lock`
+    const deadline = Date.now() + LOCK_TIMEOUT_MS
+    let fd: number | undefined
+    let broke = false
+    for (;;) {
+      try {
+        fd = fs.openSync(lockPath, "wx")
+        break
+      } catch {
+        // a lock older than the wait window belongs to a crashed writer: remove it once,
+        // rather than have every later write busy-wait the whole window inside a hook
+        if (!broke && lockAgeMs(lockPath) >= LOCK_TIMEOUT_MS) {
+          broke = true
+          try {
+            fs.unlinkSync(lockPath)
+          } catch {}
+          continue
+        }
+        if (Date.now() >= deadline) break
+        sleepSync(5)
+      }
+    }
+    try {
+      return fn()
+    } finally {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd)
+          fs.unlinkSync(lockPath)
+        } catch {}
+      }
+    }
+  }
+
+  /** Registry read-modify-write; the caller must hold the registry lock. */
+  private putLocked(sessionID: string, treeId: string): void {
+    this.registryCache = undefined // the other half may have written while we waited for the lock
+    const registry = { ...this.readRegistry(), [sessionID]: treeId }
     // atomic: temp file + rename, so a concurrent reader never sees a partial file
     const tmp = `${this.registryPath()}.${process.pid}.${Date.now()}.tmp`
     fs.writeFileSync(tmp, `${JSON.stringify(registry, null, 2)}\n`)
     fs.renameSync(tmp, this.registryPath())
-    this.registryCache = { mtimeMs: fs.statSync(this.registryPath()).mtimeMs, data: registry }
+    this.registryCache = undefined
+  }
+
+  /** Registers a session under a tree, creating the tree if this is its first session. */
+  registerSession(sessionID: string, treeId: string): void {
+    this.ensureDir()
+    if (this.readRegistry()[sessionID] === treeId) return
+    this.withRegistryLock(() => this.putLocked(sessionID, treeId))
   }
 
   /** Append one journal line. Append-only: existing lines are never rewritten. */
   append(treeId: string, entry: JournalEntry): void {
     this.ensureDir()
     fs.appendFileSync(this.journalPath(treeId), `${JSON.stringify(entry)}\n`)
+    this.cache.delete(treeId) // our own append must be visible even inside one filesystem mtime tick
   }
 
-  /** Read + parse a tree's journal, with an mtime-checked cache so repeated reads within one
+  /** Read + parse a tree's journal, with a stat-checked cache so repeated reads within one
    *  transform hook (DESIGN.md §8's "sub-millisecond mtime check") are cheap. */
   private readEntries(treeId: string): JournalEntry[] {
-    const journalPath = this.journalPath(treeId)
-    if (!fs.existsSync(journalPath)) return []
-    const mtimeMs = fs.statSync(journalPath).mtimeMs
     const cached = this.cache.get(treeId)
-    if (cached && cached.mtimeMs === mtimeMs) return cached.entries
-    const entries = parseJournal(fs.readFileSync(journalPath, "utf8"))
+    const key = statKey(this.journalPath(treeId))
+    if (key === undefined) return cached?.entries ?? []
+    if (cached && cached.key === key) return cached.entries
+    let raw: string
+    try {
+      raw = fs.readFileSync(this.journalPath(treeId), "utf8")
+    } catch {
+      return cached?.entries ?? []
+    }
+    const entries = parseJournal(raw)
     const state = foldJournal(entries, treeId)
-    this.cache.set(treeId, { mtimeMs, entries, state })
+    this.cache.set(treeId, { key, entries, state })
     return entries
   }
 
@@ -147,10 +206,18 @@ export class JournalStore {
   ensureTree(sessionID: string, actor: JournalActor): string {
     const existing = this.treeIdFor(sessionID)
     if (existing) return existing
-    const treeId = `t_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 6)}`
-    this.registerSession(sessionID, treeId)
-    this.record(treeId, "tree.created", { rootSessionID: sessionID }, actor)
-    return treeId
+    this.ensureDir()
+    // minting and registering must be one critical section: both halves adopt the same
+    // `session.created`, and an unlocked read-then-write mints two trees for one session
+    return this.withRegistryLock(() => {
+      this.registryCache = undefined
+      const raced = this.readRegistry()[sessionID]
+      if (raced) return raced
+      const treeId = `t_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 6)}`
+      this.putLocked(sessionID, treeId)
+      this.record(treeId, "tree.created", { rootSessionID: sessionID }, actor)
+      return treeId
+    })
   }
 
   /** Folded tree state for a session, or `undefined` if the session has no tree yet. */
@@ -159,6 +226,37 @@ export class JournalStore {
     if (!treeId) return undefined
     return this.stateFor(treeId)
   }
+}
+
+/** Cache key: mtime alone cannot separate two writes inside one filesystem tick. */
+function statKey(file: string): string | undefined {
+  try {
+    const st = fs.statSync(file)
+    return `${st.mtimeMs}:${st.size}`
+  } catch {
+    return undefined
+  }
+}
+
+/** How long a lock file has existed; `Infinity` when it is already gone. */
+function lockAgeMs(lockPath: string): number {
+  try {
+    return Date.now() - fs.statSync(lockPath).mtimeMs
+  } catch {
+    return Infinity
+  }
+}
+
+const SLEEP_SLOT = new Int32Array(new SharedArrayBuffer(4))
+
+function sleepSync(ms: number): void {
+  Atomics.wait(SLEEP_SLOT, 0, 0, ms)
+}
+
+function isFsRoot(p: string): boolean {
+  if (!p) return true
+  const abs = path.resolve(p)
+  return abs === path.parse(abs).root
 }
 
 function defaultStateDir(): string {

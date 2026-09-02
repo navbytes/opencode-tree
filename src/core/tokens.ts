@@ -47,9 +47,10 @@ function partText(part: MinimalPart): string {
 
 /**
  * Context size of a session's message list: the last assistant turn's real
- * `tokens.input`, plus a chars/4 estimate of everything after it (DESIGN.md §3.3 /
- * §6.7). Returns `{ tokens, estimated }` where `estimated` is true only when no
- * assistant turn has been seen yet (the whole figure is then a chars/4 guess).
+ * `tokens.input`, plus a chars/4 estimate of everything the next request will add on
+ * top of it — that turn's own output and tool results included (DESIGN.md §3.3 /
+ * §6.7). Returns `{ tokens, estimated }`; `estimated` is true whenever any part of
+ * the figure is a chars/4 guess.
  */
 export function contextSizeOf(messages: MinimalMessage[]): { tokens: number; estimated: boolean } {
   let lastAssistantIndex = -1
@@ -71,8 +72,10 @@ export function contextSizeOf(messages: MinimalMessage[]): { tokens: number; est
     return { tokens: estimated, estimated: true }
   }
 
+  // starts AT the last assistant: its `tokens.input` is the context it was *given*, so its
+  // own output and tool results are only in the context from the next request on.
   let newer = 0
-  for (let i = lastAssistantIndex + 1; i < messages.length; i++) {
+  for (let i = lastAssistantIndex; i < messages.length; i++) {
     for (const part of messages[i]!.parts) newer += estimateTokens(partText(part))
   }
 

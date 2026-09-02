@@ -23,7 +23,7 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
       server: [path.join(REPO_ROOT, "dist", "server.js")],
       tui: [path.join(REPO_ROOT, "dist", "tui.js")],
     })
-  }, 120_000)
+  })
 
   afterAll(async () => {
     await mock?.stop()

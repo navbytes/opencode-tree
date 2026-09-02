@@ -18,21 +18,24 @@ export function hasEditor(): boolean {
 export async function editInExternalEditor(renderer: RendererLike, value: string, cwd?: string): Promise<string | undefined> {
   const editor = process.env["VISUAL"] || process.env["EDITOR"]
   if (!editor) return undefined
-  const file = path.join(os.tmpdir(), `ctree-decision-${Date.now()}.md`)
-  fs.writeFileSync(file, value)
+  // private dir + 0600: the draft can quote source, and /tmp is world-readable
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ctree-"))
+  const file = path.join(dir, "decision.md")
+  fs.writeFileSync(file, value, { mode: 0o600 })
   renderer.suspend()
   renderer.currentRenderBuffer?.clear?.()
   try {
     await new Promise<void>((resolve, reject) => {
-      const parts = editor.split(" ")
-      const child = spawn(parts[0]!, [...parts.slice(1), file], { cwd: cwd && fs.existsSync(cwd) ? cwd : process.cwd(), stdio: "inherit", shell: process.platform === "win32" })
+      const options = { cwd: cwd && fs.existsSync(cwd) ? cwd : process.cwd(), stdio: "inherit" as const }
+      // through the shell, like OpenCode's own openEditor(): $EDITOR may carry flags or quotes
+      const child = process.platform === "win32" ? spawn(editor, [file], { ...options, shell: true }) : spawn("sh", ["-c", `${editor} "$1"`, "sh", file], options)
       child.on("error", reject)
       child.on("exit", (code, signal) => (code === 0 ? resolve() : reject(new Error(`editor exited with ${signal ? `signal ${signal}` : `code ${code}`}`))))
     })
     const text = fs.readFileSync(file, "utf8")
     return text.trim() ? text : undefined
   } finally {
-    fs.rmSync(file, { force: true })
+    fs.rmSync(dir, { recursive: true, force: true })
     renderer.currentRenderBuffer?.clear?.()
     renderer.resume()
     renderer.requestRender?.()

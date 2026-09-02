@@ -121,7 +121,7 @@ function applyResultCrop(messages: MinimalMessage[], crop: CropSpec, lastUserInd
 function applyTurnCrop(messages: MinimalMessage[], crop: CropSpec, lastUserIndex: number): void {
   const startIndex = messages.findIndex((m) => m.info.id === crop.anchorMessageID)
   if (startIndex === -1) return // already dropped (idempotent) or not in this array
-  if (startIndex === lastUserIndex) return // never touch the last user message
+  if (startIndex >= lastUserIndex) return // nothing at or after the last user message is ever dropped
   const anchor = messages[startIndex]!
   if (anchor.info.role !== "user") return
   if (isDecisionMessage(anchor)) return

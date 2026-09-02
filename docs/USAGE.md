@@ -4,11 +4,17 @@
 
 ```jsonc
 // opencode.json (server half: crops, branch model, headless /ctree commands)
-{ "plugin": ["opencode-context-tree"] }
+{ "plugin": [["opencode-context-tree", { "storage": "local" }]] }
 // tui.json (TUI half: /tree, /branch, /merge, /decisions, gauge, sidebar card)
-{ "plugin": ["opencode-context-tree"] }
-// options (either file): { "plugin": [["opencode-context-tree", { "storage": "local", "jumpSummary": "ask" }]] }
+{ "plugin": [["opencode-context-tree", { "storage": "local", "jumpSummary": "ask" }]] }
 ```
+
+Each half only sees the options of its own file, and both halves read `storage` — so if you
+change it, **set the same `storage` in both files**, or the TUI and the server end up with
+two different journals (crops written by one would never reach the other). The remaining
+options only matter to the half that implements them (`storage` both; `jumpSummary`,
+`hardCrop`, `keybinds` TUI-only). Plain `{ "plugin": ["opencode-context-tree"] }` in both
+files is fine and uses the defaults.
 
 From a checkout: `bun install && bun run build`, then list `/abs/path/dist/server.js` and
 `/abs/path/dist/tui.js` instead of the package name.
@@ -51,7 +57,7 @@ x                  undo the last crop / branch / merge on this path
 | `x` | undo |
 | `D` `E` | decisions panel, export `ctree-decisions.md` |
 | `u` | consumers: what is filling the context |
-| `i` | inspector pane on/off (auto-hidden under 100 columns) |
+| `i` | inspector pane on/off (auto-hidden under 110 columns) |
 | `1 2 3` | minimap lanes by duration / turns / tool calls |
 | `L` | label the selected message |
 | `f` `/` | filter cycle (default → no-tools → user-only → labeled → all), search |
@@ -78,6 +84,12 @@ Palette: **Context tree**, **Branch here**, **Merge branch**, **Decisions**, **L
   forks the trunk); below, to your branch. `T<n>` counts turns along the path.
 - `⎇` rows hang off the message they were forked from. Colours: open green, squashed blue,
   rejected red, abandoned/deleted grey.
+- From inside a branch, its own `⎇` row is drawn at the fork point with `← here`; the rows
+  below it are the branch's own turns.
+- `┆⎇` rows at the bottom are branches you cannot reach on the active path (siblings, or the
+  trunk continuing past your fork point); `⏎` switches to them, `→` expands them.
+- Sessions made with OpenCode's own `/fork` are adopted into the tree automatically (matched
+  to their parent by the copied message prefix; they show under the session's title).
 - Tokens: `~` means estimated (chars/4); assistant steps use the model's own counts.
 - `⚠` ≥10k tokens, `✂` cropped, `✗` tool error, `◆` decision record, `◇` branch summary.
 - The gauge on the prompt line: `ctx 46k/200k · filling ▲+24% (bash)` — absolute bands
@@ -86,15 +98,24 @@ Palette: **Context tree**, **Branch here**, **Merge branch**, **Decisions**, **L
 
 ## Headless (desktop / web / scripts)
 
-`/ctree status` · `/ctree branch <name> [provider/model]` · `/ctree crop --top [--apply]` ·
+`/ctree status` · `/ctree branch <name> [provider/model]` · `/ctree merge --discard [note]` ·
+`/ctree crop --top [--apply]` ·
 `/ctree crop --auto [--apply] [--min-tokens N] [--older-than N] [--keep glob]` · `/ctree undo` ·
-`/ctree decisions`. These run as OpenCode commands, so the model answers with a one-line
-acknowledgement.
+`/ctree decisions [--export [path]]` (no path → `./ctree-decisions.md`, relative to the
+project directory). These run as OpenCode commands, so the model answers with a one-line
+acknowledgement. (Squash merges need the TUI's `$EDITOR` gate.)
+
+`/ctree branch` takes the whole rest of the line as the name unless the last word looks like
+a model (`provider/model`): `/ctree branch fix flaky test` names the branch "fix flaky test",
+`/ctree branch fix anthropic/claude-haiku-4-5` names it "fix" and runs it on that model.
 
 ## What is (and is not) touched
 
 - Branch = OpenCode session (`session.fork`). The plugin remembers `(parent, anchor)` in
   `.opencode/context-tree/<tree>.jsonl` (append-only) and mirrors it into `session.metadata`.
+- Sessions you fork with OpenCode's own `/fork` are adopted into the tree automatically (the
+  copied message prefix identifies the parent); they show up under it with their session
+  title. Adoption only appends a journal line — the sessions themselves are untouched.
 - Crops and hidden records are applied per request in the server plugin; OpenCode's own
   storage is never rewritten. `/undo` appends, never deletes.
 - Decision records are ordinary user messages (`noReply`) tagged in part metadata; they are

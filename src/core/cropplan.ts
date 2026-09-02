@@ -80,21 +80,31 @@ function isCtreeKind(message: TranscriptMessage, kind: string): boolean {
   return message.parts.some((p) => (p.metadata?.["ctree"] as { kind?: string } | undefined)?.kind === kind)
 }
 
-type Turn = { index: number; user: TranscriptMessage; assistants: TranscriptMessage[] }
+type Turn = { index: number; user?: TranscriptMessage; assistants: TranscriptMessage[] }
 
 function turnsOf(messages: TranscriptMessage[]): Turn[] {
   const turns: Turn[] = []
+  let index = 0
   for (const m of messages) {
-    if (m.role === "user") turns.push({ index: turns.length + 1, user: m, assistants: [] })
-    else turns[turns.length - 1]?.assistants.push(m)
+    if (m.role === "user") turns.push({ index: ++index, user: m, assistants: [] })
+    else {
+      // after a compaction the transcript opens with an assistant summary: it gets turn 0
+      if (turns.length === 0) turns.push({ index: 0, assistants: [] })
+      turns[turns.length - 1]!.assistants.push(m)
+    }
   }
   return turns
+}
+
+/** Index of the turn in progress (the last one), for the "current turn" protection. */
+function lastTurnIndex(turns: Turn[]): number {
+  return turns.at(-1)?.index ?? 0
 }
 
 /** Every completed tool result in the transcript, newest last, with its protections. */
 export function resultCandidates(transcript: Transcript, opts: { alreadyCropped?: Set<string>; keep?: string[]; minTokens?: number } = {}): ResultCandidate[] {
   const turns = turnsOf(transcript.messages)
-  const total = turns.length
+  const total = lastTurnIndex(turns)
   const out: ResultCandidate[] = []
   for (const turn of turns) {
     for (const m of turn.assistants) {
@@ -128,8 +138,10 @@ export function resultCandidates(transcript: Transcript, opts: { alreadyCropped?
 /** Every user turn with its answers, as a droppable unit. */
 export function turnCandidates(transcript: Transcript, opts: { alreadyDropped?: Set<string> } = {}): TurnCandidate[] {
   const turns = turnsOf(transcript.messages)
-  const total = turns.length
-  return turns.map((turn) => {
+  const total = lastTurnIndex(turns)
+  const out: TurnCandidate[] = []
+  for (const turn of turns) {
+    if (!turn.user) continue // a compaction-opened turn has no user message to splice from
     const protections: Protection[] = []
     if (turn.index === total) protections.push("current-turn")
     if (isCtreeKind(turn.user, "decision") || turn.assistants.some((m) => isCtreeKind(m, "decision"))) protections.push("decision")
@@ -138,15 +150,19 @@ export function turnCandidates(transcript: Transcript, opts: { alreadyDropped?: 
     let text = ""
     const userText = turn.user.parts.map((p) => p.text ?? "").join("\n")
     text += userText
-    targets.push({ messageID: turn.user.id, estTokens: estimateTokens(userText), sha8: sha8(userText) })
+    targets.push({ messageID: turn.user.id, estTokens: estimateTokens(userText), sha8: "" })
     for (const m of turn.assistants) {
       const t = m.parts.map((p) => (p.type === "tool" ? (p.state?.output ?? "") : (p.text ?? ""))).join("\n")
       text += `\n${t}`
       targets.push({ messageID: m.id, estTokens: estimateTokens(t), sha8: sha8(t) })
     }
+    // the anchor target carries the whole-turn handle: it is what crop.ts shows as `recoverable:`
+    const handle = sha8(text)
+    targets[0]!.sha8 = handle
     const estTokens = targets.reduce((s, t) => s + t.estTokens, 0)
-    return { kind: "turn", anchorMessageID: turn.user.id, turn: turn.index, turnsAgo: total - turn.index, steps: 1 + turn.assistants.length, estTokens, sha8: sha8(text), targets, protections }
-  })
+    out.push({ kind: "turn", anchorMessageID: turn.user.id, turn: turn.index, turnsAgo: total - turn.index, steps: 1 + turn.assistants.length, estTokens, sha8: handle, targets, protections })
+  }
+  return out
 }
 
 /** `--auto`: pre-mark results that are big enough, old enough, and unprotected. */
@@ -172,9 +188,12 @@ export function planResultCrop(sessionID: string, selected: ResultCandidate[]): 
   return { sessionID, mode: "result", targets, anchorMessageID }
 }
 
-/** One `crop.applied` payload per dropped turn (turn crops splice, so each is its own line). */
+/** One `crop.applied` payload per dropped turn (turn crops splice, so each is its own line).
+ *  The current turn is never planned — the model must keep seeing the last user message. */
 export function planTurnCrops(sessionID: string, selected: TurnCandidate[]): CropAppliedData[] {
-  return selected.map((t) => ({ sessionID, mode: "turn", targets: t.targets, anchorMessageID: t.anchorMessageID }))
+  return selected
+    .filter((t) => !t.protections.includes("current-turn"))
+    .map((t) => ({ sessionID, mode: "turn", targets: t.targets, anchorMessageID: t.anchorMessageID }))
 }
 
 export function reclaimed(selected: (ResultCandidate | TurnCandidate)[]): number {

@@ -4,8 +4,9 @@
  * Pure planning lives in core; this file only executes plans.
  */
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
+import { createSignal } from "solid-js"
 import type { JournalStore } from "../shared/store.js"
-import type { CropAppliedData } from "../core/journal.js"
+import type { CropAppliedData, JournalEntry } from "../core/journal.js"
 import type { UndoPlan } from "../core/undo.js"
 import { DECISION_SYSTEM, branchTranscriptText, buildDecisionDraftPrompt, decisionMessageText, decisionTemplate, openSiblings } from "../core/decision.js"
 import { editInExternalEditor, hasEditor } from "./editor.js"
@@ -24,6 +25,22 @@ export type ActionContext = {
 }
 
 export type SummaryChoice = { kind: "none" } | { kind: "summarize"; customInstructions?: string }
+
+const [revision, setRevision] = createSignal(0)
+/** The journal is plain files, so views built from `store.stateFor*` subscribe to this
+ *  counter to notice writes made by this TUI (the sidebar card, the route). */
+export const journalRevision = revision
+export function bumpJournal(): void {
+  setRevision((n) => n + 1)
+}
+
+/** Every journal write from the TUI goes through here, so none can forget the bump. */
+function record<T extends JournalEntry["type"]>(ctx: ActionContext, treeId: string, type: T, data: Extract<JournalEntry, { type: T }>["data"]): JournalEntry {
+  // generic forwarding trips TS's intersection of all data shapes, as in JournalStore.record
+  const entry = ctx.store.record(treeId, type, data as never, "tui")
+  bumpJournal()
+  return entry
+}
 
 const SUMMARY_SYSTEM =
   "You are a context summarization assistant. Read a conversation between a user and an AI coding assistant and produce a structured summary in the exact format requested. Do NOT continue the conversation; ONLY output the summary."
@@ -96,12 +113,7 @@ export async function forkBranch(
   const forkedID = (forked.data as any)?.id as string | undefined
   if (!forkedID) throw new Error("fork did not return a session id")
   ctx.store.registerSession(forkedID, treeId)
-  ctx.store.record(
-    treeId,
-    "branch.opened",
-    { sessionID: forkedID, parentSessionID: input.sessionID, anchorMessageID, name: input.name, kind: input.kind, branchModel: input.branchModel, trunkModel: input.trunkModel },
-    "tui",
-  )
+  record(ctx, treeId, "branch.opened", { sessionID: forkedID, parentSessionID: input.sessionID, anchorMessageID, name: input.name, kind: input.kind, branchModel: input.branchModel, trunkModel: input.trunkModel })
   if (input.title) await ctx.api.client.session.update({ sessionID: forkedID, directory: ctx.directory, title: input.title }).catch(() => undefined)
   await mirrorMetadata(ctx, forkedID, { treeId, parentSessionID: input.sessionID, anchorMessageID, name: input.name, status: "open" })
   await mirrorMetadata(ctx, input.sessionID, { treeId })
@@ -128,14 +140,9 @@ export async function createNamedBranch(
   const forkedID = (forked.data as any)?.id as string | undefined
   if (!forkedID) throw new Error("fork did not return a session id")
   ctx.store.registerSession(forkedID, treeId)
-  ctx.store.record(
-    treeId,
-    "branch.opened",
-    { sessionID: forkedID, parentSessionID: input.sessionID, anchorMessageID: last.id, name: input.name, kind: "explicit", branchModel: input.model, trunkModel: input.trunkModel },
-    "tui",
-  )
+  record(ctx, treeId, "branch.opened", { sessionID: forkedID, parentSessionID: input.sessionID, anchorMessageID: last.id, name: input.name, kind: "explicit", branchModel: input.model, trunkModel: input.trunkModel })
   debug("branch.recorded")
-  ctx.store.record(treeId, "label.set", { sessionID: input.sessionID, messageID: last.id, label: `⎇ ${input.name}` }, "tui")
+  record(ctx, treeId, "label.set", { sessionID: input.sessionID, messageID: last.id, label: `⎇ ${input.name}` })
   await ctx.api.client.session.update({ sessionID: forkedID, directory: ctx.directory, title: `⎇ ${input.name}` }).catch(() => undefined)
   await mirrorMetadata(ctx, forkedID, { treeId, parentSessionID: input.sessionID, anchorMessageID: last.id, name: input.name, status: "open" })
   await mirrorMetadata(ctx, input.sessionID, { treeId })
@@ -166,7 +173,10 @@ export async function executeJump(
     target = await forkBranch(ctx, { sessionID: plan.sessionID, messageID: plan.messageID, kind: plan.mode === "redo" ? "redo" : "jump" })
   }
   if (opts.summary.kind === "summarize" && leavingTip && target !== opts.currentSessionID) {
-    await summarizeInto(ctx, { fromSessionID: opts.currentSessionID, fromMessageID: leavingTip, targetSessionID: target, customInstructions: opts.summary.customInstructions })
+    // the fork already exists; a failed summary must not strand the user on the old session
+    await summarizeInto(ctx, { fromSessionID: opts.currentSessionID, fromMessageID: leavingTip, targetSessionID: target, customInstructions: opts.summary.customInstructions }).catch((e) =>
+      ctx.api.ui.toast({ variant: "error", message: `summary failed: ${e instanceof Error ? e.message : String(e)} — moved without it` }),
+    )
   }
   debug("jump.navigate", { target })
   navigateToSession(ctx, target)
@@ -222,7 +232,7 @@ export async function summarizeInto(
     })
     const messageID = (injected.data as any)?.info?.id ?? (injected.data as any)?.id
     const treeId = ctx.store.ensureTree(input.targetSessionID, "tui")
-    ctx.store.record(treeId, "summary.recorded", { sessionID: input.targetSessionID, messageID: String(messageID ?? ""), fromSessionID: input.fromSessionID, fromMessageID: input.fromMessageID }, "tui")
+    record(ctx, treeId, "summary.recorded", { sessionID: input.targetSessionID, messageID: String(messageID ?? ""), fromSessionID: input.fromSessionID, fromMessageID: input.fromMessageID })
     ctx.api.ui.toast({ variant: "success", message: "Branch summary added" })
     return summary
   } finally {
@@ -232,7 +242,7 @@ export async function summarizeInto(
 
 export function setLabel(ctx: ActionContext, input: { sessionID: string; messageID: string; label: string | null }): void {
   const treeId = ctx.store.ensureTree(input.sessionID, "tui")
-  ctx.store.record(treeId, "label.set", { sessionID: input.sessionID, messageID: input.messageID, label: input.label }, "tui")
+  record(ctx, treeId, "label.set", { sessionID: input.sessionID, messageID: input.messageID, label: input.label })
 }
 
 /** Record a crop (the server half applies it on the next turn). With `hard`, result crops
@@ -240,7 +250,7 @@ export function setLabel(ctx: ActionContext, input: { sessionID: string; message
  *  TUI renders "[Old tool result content cleared]" and hides the text (DESIGN.md §6.5). */
 export async function applyCrop(ctx: ActionContext, data: CropAppliedData, opts: { hard?: boolean } = {}): Promise<string> {
   const treeId = ctx.store.ensureTree(data.sessionID, "tui")
-  const entry = ctx.store.record(treeId, "crop.applied", data, "tui")
+  const entry = record(ctx, treeId, "crop.applied", data)
   if (opts.hard && data.mode === "result") await setCompacted(ctx, data.sessionID, data.targets.map((t) => ({ messageID: t.messageID, partID: t.partID })), Date.now())
   return entry.id
 }
@@ -265,7 +275,7 @@ export async function executeUndo(ctx: ActionContext, sessionID: string, plan: U
       ctx.api.ui.toast({ message: "nothing to undo on this path" })
       return undefined
     case "restore-crop": {
-      ctx.store.record(treeId, "crop.restored", { cropID: plan.cropID }, "tui")
+      record(ctx, treeId, "crop.restored", { cropID: plan.cropID })
       const crop = ctx.store.stateFor(treeId).crops[plan.cropID]
       if (crop && crop.mode === "result") await setCompacted(ctx, sessionID, crop.targets.map((t) => ({ messageID: t.messageID, partID: t.partID })), undefined)
       ctx.api.ui.toast({ variant: "success", message: `↶ restored ${plan.mode === "turn" ? "dropped turn" : "cropped result"} (~${Math.round(plan.estTokens / 100) / 10}k tokens back in context)` })
@@ -273,7 +283,7 @@ export async function executeUndo(ctx: ActionContext, sessionID: string, plan: U
     }
     case "abandon-branch": {
       await abortIfBusy(ctx, sessionID)
-      ctx.store.record(treeId, "branch.closed", { sessionID: plan.sessionID, status: "abandoned" }, "tui")
+      record(ctx, treeId, "branch.closed", { sessionID: plan.sessionID, status: "abandoned" })
       await mirrorMetadata(ctx, plan.sessionID, { status: "abandoned" })
       navigateToSession(ctx, plan.parentSessionID)
       ctx.api.ui.toast({ variant: "success", message: `↶ back on the trunk; ⎇ ${plan.name ?? "branch"} kept as abandoned` })
@@ -282,12 +292,7 @@ export async function executeUndo(ctx: ActionContext, sessionID: string, plan: U
     case "reopen-branch": {
       const branch = ctx.store.stateFor(treeId).sessions[plan.sessionID]
       if (!branch) return undefined
-      ctx.store.record(
-        treeId,
-        "branch.opened",
-        { sessionID: branch.sessionID, parentSessionID: branch.parentSessionID, anchorMessageID: branch.anchorMessageID, name: branch.name, kind: branch.kind, branchModel: branch.branchModel, trunkModel: branch.trunkModel },
-        "tui",
-      )
+      record(ctx, treeId, "branch.opened", { sessionID: branch.sessionID, parentSessionID: branch.parentSessionID, anchorMessageID: branch.anchorMessageID, name: branch.name, kind: branch.kind, branchModel: branch.branchModel, trunkModel: branch.trunkModel })
       await mirrorMetadata(ctx, plan.sessionID, { status: "open" })
       navigateToSession(ctx, plan.sessionID)
       ctx.api.ui.toast({ variant: "success", message: `↶ re-opened ⎇ ${branch.name ?? "branch"}${plan.decisionMessageID ? " (its decision record is hidden from the model)" : ""}` })
@@ -337,7 +342,7 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
   await abortIfBusy(ctx, input.sessionID)
 
   if (input.mode === "discard") {
-    ctx.store.record(treeId, "branch.closed", { sessionID: input.sessionID, status: "rejected", note: input.note }, "tui")
+    record(ctx, treeId, "branch.closed", { sessionID: input.sessionID, status: "rejected", note: input.note })
     await mirrorMetadata(ctx, input.sessionID, { status: "rejected" })
     navigateToSession(ctx, parentID)
     ctx.api.ui.toast({ variant: "success", message: `⎇ ${name} discarded — back on the trunk` })
@@ -346,9 +351,9 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
 
   // --- draft ---------------------------------------------------------------
   const parentMsgs = await ctx.api.client.session.messages({ sessionID: parentID, directory: ctx.directory })
-  const anchorIndex = ((parentMsgs.data as any[]) ?? []).findIndex((m) => m.info.id === branch.anchorMessageID)
+  const parentMessageIDs = ((parentMsgs.data as any[]) ?? []).map((m) => String(m.info.id))
   const own = await fetchOwnTranscript(ctx, input.sessionID)
-  const transcript = branchTranscriptText(own, anchorIndex)
+  const transcript = branchTranscriptText(own, { messageID: branch.anchorMessageID, parentMessageIDs })
   const model = branch.branchModel ?? branch.trunkModel
   const modelRef = model ? { providerID: model.split("/")[0]!, modelID: model.split("/").slice(1).join("/") } : undefined
   const siblingIDs = input.mode === "tournament" ? openSiblings(state, input.sessionID) : []
@@ -356,8 +361,7 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
     siblingIDs.map(async (id) => {
       const tr = await fetchOwnTranscript(ctx, id)
       const b = state.sessions[id]!
-      const idx = ((parentMsgs.data as any[]) ?? []).findIndex((m) => m.info.id === b.anchorMessageID)
-      return { name: b.name ?? id, transcript: branchTranscriptText(tr, idx, 800) }
+      return { name: b.name ?? id, transcript: branchTranscriptText(tr, { messageID: b.anchorMessageID, parentMessageIDs }, 800) }
     }),
   )
   let draft: string
@@ -388,9 +392,9 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
   })
   const messageID = String((landed.data as any)?.info?.id ?? (landed.data as any)?.id ?? "")
   if (!messageID) throw new Error("could not write the decision record into the trunk")
-  ctx.store.record(treeId, "decision.recorded", { sessionID: parentID, messageID, forkSessionID: input.sessionID, branchName: name, siblings: siblings.map((s) => ({ name: s.name })), text }, "tui")
-  ctx.store.record(treeId, "branch.closed", { sessionID: input.sessionID, status: "squashed", decisionMessageID: messageID }, "tui")
-  for (const id of siblingIDs) ctx.store.record(treeId, "branch.closed", { sessionID: id, status: "rejected", note: `lost tournament to ${name}` }, "tui")
+  record(ctx, treeId, "decision.recorded", { sessionID: parentID, messageID, forkSessionID: input.sessionID, branchName: name, siblings: siblings.map((s) => ({ name: s.name })), text })
+  record(ctx, treeId, "branch.closed", { sessionID: input.sessionID, status: "squashed", decisionMessageID: messageID })
+  for (const id of siblingIDs) record(ctx, treeId, "branch.closed", { sessionID: id, status: "rejected", note: `lost tournament to ${name}` })
   await mirrorMetadata(ctx, input.sessionID, { status: "squashed", decisionMessageID: messageID })
   for (const id of siblingIDs) await mirrorMetadata(ctx, id, { status: "rejected" })
   debug("merge.landed", { messageID, siblings: siblingIDs.length })

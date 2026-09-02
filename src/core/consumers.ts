@@ -24,6 +24,7 @@ export function consumers(transcript: Transcript, opts: { cropped?: Set<string> 
         if (kind === "decision") add("◆ decisions", "decision", estimateTokens(p.text ?? ""))
         else if (kind === "summary") add("◇ branch summaries", "summary", estimateTokens(p.text ?? ""))
         else if (m.role === "user") add("● user prompts", "user", estimateTokens(p.text ?? ""))
+        else if (m.summary) add("◇ compaction summaries", "summary", estimateTokens(p.text ?? ""))
         else add("○ assistant text", "assistant", estimateTokens(p.text ?? ""))
       } else if (p.type === "reasoning") add("(thinking)", "reasoning", estimateTokens(p.text ?? ""))
     }

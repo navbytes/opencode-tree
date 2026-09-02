@@ -9,8 +9,12 @@
  * session from after its anchor to its tip. Rows therefore carry their *owning*
  * session's message IDs (jumping into the prefix forks the ancestor, not the copy) and
  * `branch` rows attach right after the anchor message of the segment they fork from.
- * `anchorMessageID` is the **last message shared** with the parent (inclusive). A `git log --graph`
- * gutter (`├⎇` / `╰⎇` / `│ `) draws the tree axis; row order is the time axis.
+ * `anchorMessageID` is the **last message shared** with the parent (inclusive). Whatever the
+ * path does not draw — branches anchored past the fork point, the ancestors' own tips — is
+ * appended as an "elsewhere" group so it stays reachable. Each spine session's own fork
+ * point is drawn as a `╰⎇` marker row (`isCurrent` on the session you are in), with its
+ * segment under it like an expanded branch. A `git log --graph` gutter
+ * (`├⎇` / `╰⎇` / `│ ` / `┆⎇` for elsewhere) draws the tree axis; row order is the time axis.
  *
  * Pure, no OpenCode/opentui/solid-js imports — see test/core-purity.test.ts.
  */
@@ -69,12 +73,17 @@ export type BranchRow = {
   gutter: string
   name: string
   status: "open" | "squashed" | "rejected" | "discarded" | "abandoned" | "deleted"
+  /** The reason recorded when the branch was closed (discard "Why?", tournament epitaph). */
+  note?: string
   turns: number
   tokens: number
   model?: string
   expanded: boolean
   isCurrent: boolean
   last: boolean
+  /** Synthetic row: an ancestor's *own* continuation past our fork point, not a branch
+   *  of it — it has no parent and no branch status to show. */
+  ancestor?: true
 }
 
 export type Row = TurnRow | StepRow | BranchRow
@@ -84,6 +93,9 @@ export type TreeView = {
   indexById: Record<string, number>
   currentRowId?: string
   totalTokens: number
+  /** true when any part of `totalTokens` is a chars/4 guess — render it as `~`.
+   *  Optional so callers can build a placeholder view without it. */
+  totalEstimated?: boolean
 }
 
 export type CropRef = { messageID: string; partID?: string }
@@ -154,11 +166,15 @@ function findLastUserIndex(messages: TranscriptMessage[]): number {
  *  model, else a chars/4 estimate (DESIGN.md §7's row `tokens` column). */
 function stepTokensFor(part: StepPart, message: TranscriptMessage): { tokens: number; estimated: boolean } {
   const text = partText(part)
-  const output = message.tokens?.output
-  if (typeof output === "number" && output > 0) {
-    const totalLen = message.parts.reduce((sum, p) => sum + partText(p).length, 0)
-    if (totalLen > 0) {
-      return { tokens: Math.round(output * (text.length / totalLen)), estimated: false }
+  // a tool result is not model output: `tokens.output` never covers it, and splitting the
+  // model's output across it would price an 80k-char result at a few dozen tokens
+  if (part.type !== "tool") {
+    const output = message.tokens?.output
+    if (typeof output === "number" && output > 0) {
+      const generatedLen = message.parts.reduce((sum, p) => (p.type === "tool" ? sum : sum + partText(p).length), 0)
+      if (generatedLen > 0) {
+        return { tokens: Math.round(output * (text.length / generatedLen)), estimated: false }
+      }
     }
   }
   return { tokens: estimateTokens(text), estimated: true }
@@ -247,6 +263,10 @@ type Ctx = {
   crops: CropRef[]
   anchorMap: Map<string, BranchState[]>
   spineSessions: Set<string>
+  /** `${parentSessionID}:${anchorMessageID}` → the spine session that forks off there. */
+  spineMarkers: Map<string, BranchState>
+  /** sessionIDs already drawn as a branch row, so the "elsewhere" group can skip them. */
+  placed: Set<string>
 }
 
 function isCropped(ctx: Ctx, messageID: string, partID: string): boolean {
@@ -311,48 +331,94 @@ function emitAssistantRows(ctx: Ctx, sessionID: string, message: TranscriptMessa
   }
 }
 
+/** A branch as far as a row cares. An ancestor's own continuation past the fork point is
+ *  drawn as a synthetic one (parent = itself), so both paths share this code. */
+type BranchLike = Pick<BranchState, "sessionID" | "parentSessionID" | "anchorMessageID"> &
+  Partial<Pick<BranchState, "name" | "status" | "note" | "model" | "forgotten">> & { ancestor?: true }
+
+function pushBranch(ctx: Ctx, branch: BranchLike, o: { depth: number; gutter: string; last: boolean; spine?: boolean }, out: Row[]): void {
+  const branchTranscript = ctx.transcripts[branch.sessionID]
+  const parentTranscript = ctx.transcripts[branch.parentSessionID]
+  const anchorIndex = parentTranscript?.messages.findIndex((m) => m.id === branch.anchorMessageID) ?? -1
+  // the branch's own messages start after the copied prefix (anchor inclusive)
+  const tail = branchTranscript ? branchTranscript.messages.slice(anchorIndex + 1) : []
+  // a spine marker is always "expanded": the walk that emitted it renders its rows next
+  const expanded = o.spine === true || ctx.expanded.has(branch.sessionID)
+  ctx.placed.add(branch.sessionID)
+
+  out.push({
+    kind: "branch",
+    // an ancestor's tail is a different row from that same session's fork-point marker
+    id: `branch:${branch.sessionID}${branch.ancestor ? ":tail" : ""}`,
+    sessionID: branch.sessionID,
+    parentSessionID: branch.parentSessionID,
+    anchorMessageID: branch.anchorMessageID,
+    depth: o.depth,
+    gutter: o.gutter,
+    // adopted native forks carry no name: fall back to the session's live title
+    name: branch.name ?? branchTranscript?.title ?? branch.sessionID,
+    status: branch.forgotten ? "deleted" : (branch.status ?? "open"),
+    note: branch.note,
+    turns: tail.filter((m) => m.role === "user").length,
+    tokens: aggregateTokens(tail),
+    model: branch.model,
+    expanded,
+    // true only on the spine marker of the session you are in (rendered as `← here`)
+    isCurrent: branch.sessionID === ctx.currentSessionID,
+    last: o.last,
+    ...(branch.ancestor ? { ancestor: branch.ancestor } : {}),
+  })
+
+  if (!o.spine && expanded && branchTranscript) {
+    // continue the parent's turn numbering: the branch's first turn follows the anchor's turn
+    const turnAtAnchor = parentTranscript ? parentTranscript.messages.slice(0, anchorIndex + 1).filter((m) => m.role === "user").length : 0
+    renderMessages(ctx, branch.sessionID, tail, o.depth + 1, "│ ", out, { turn: turnAtAnchor })
+  }
+}
+
 function emitBranches(ctx: Ctx, sessionID: string, anchorMessageID: string, depth: number, out: Row[]): void {
   if (!branchAllowed(ctx.filter)) return
   const candidates = (ctx.anchorMap.get(anchorMessageID) ?? []).filter(
     (b) => b.parentSessionID === sessionID && !ctx.spineSessions.has(b.sessionID),
   )
+  // the path we are on forks here too; it is drawn last, below its siblings (DESIGN.md §7.2)
+  const marker = ctx.spineMarkers.get(`${sessionID}:${anchorMessageID}`)
 
   candidates.forEach((branch, i) => {
-    const last = i === candidates.length - 1
-    const branchTranscript = ctx.transcripts[branch.sessionID]
-    const parentTranscript = ctx.transcripts[branch.parentSessionID]
-    const anchorIndex = parentTranscript?.messages.findIndex((m) => m.id === branch.anchorMessageID) ?? -1
-    // the branch's own messages start after the copied prefix (anchor inclusive)
-    const tail = branchTranscript ? branchTranscript.messages.slice(anchorIndex + 1) : []
-    const expanded = ctx.expanded.has(branch.sessionID)
-
-    out.push({
-      kind: "branch",
-      id: `branch:${branch.sessionID}`,
-      sessionID: branch.sessionID,
-      parentSessionID: branch.parentSessionID,
-      anchorMessageID: branch.anchorMessageID,
-      depth,
-      gutter: last ? "╰⎇" : "├⎇",
-      name: branch.name ?? branch.sessionID,
-      status: branch.forgotten ? "deleted" : branch.status,
-      turns: tail.filter((m) => m.role === "user").length,
-      tokens: aggregateTokens(tail),
-      model: branch.model,
-      expanded,
-      // The current session never appears as a branch row (it is excluded from
-      // `candidates` via `spineSessions`), so this is always false in practice —
-      // kept for a truthful, type-complete Row rather than a hidden invariant.
-      isCurrent: branch.sessionID === ctx.currentSessionID,
-      last,
-    })
-
-    if (expanded && branchTranscript) {
-      // continue the parent's turn numbering: the branch's first turn follows the anchor's turn
-      const turnAtAnchor = parentTranscript ? parentTranscript.messages.slice(0, anchorIndex + 1).filter((m) => m.role === "user").length : 0
-      renderMessages(ctx, branch.sessionID, tail, depth + 1, "│ ", out, { turn: turnAtAnchor })
-    }
+    const last = !marker && i === candidates.length - 1
+    pushBranch(ctx, branch, { depth, gutter: last ? "╰⎇" : "├⎇", last }, out)
   })
+  if (marker) pushBranch(ctx, marker, { depth, gutter: "╰⎇", last: true, spine: true }, out)
+}
+
+/** Gutter of the "elsewhere" group: a dashed trunk, i.e. off the rendered path. */
+const ELSEWHERE_GUTTER = "┆⎇"
+
+/**
+ * Everything else in the tree, appended below the path (DESIGN.md §6.2's "the old
+ * branch is untouched and stays visible"): branches whose anchor is not inside any
+ * rendered segment — siblings forked further down an ancestor — and each ancestor's
+ * own continuation past the point we forked away from it. Without these, forking from
+ * the middle of the trunk hides both the trunk tip and every later branch.
+ */
+function emitElsewhere(ctx: Ctx, ancestorTails: BranchLike[], out: Row[]): void {
+  if (!branchAllowed(ctx.filter)) return
+
+  const rows: Row[] = []
+  for (const tail of ancestorTails) pushBranch(ctx, tail, { depth: 0, gutter: ELSEWHERE_GUTTER, last: false }, rows)
+  for (const sessionID of Object.keys(ctx.state.sessions)) {
+    if (ctx.placed.has(sessionID) || ctx.spineSessions.has(sessionID)) continue
+    pushBranch(ctx, ctx.state.sessions[sessionID]!, { depth: 0, gutter: ELSEWHERE_GUTTER, last: false }, rows)
+  }
+  if (rows.length === 0) return
+
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]!
+    if (row.kind !== "branch") continue
+    row.last = true
+    break
+  }
+  out.push(...rows)
 }
 
 function renderMessages(
@@ -456,9 +522,11 @@ function applySearch(rows: Row[], search: string): Row[] {
 // Total tokens.
 // ---------------------------------------------------------------------------
 
-/** Last assistant `tokens.input` in the current session, plus a chars/4 estimate of
- *  anything newer (DESIGN.md §3.3 / §6.7), mirroring `tokens.ts`'s `contextSizeOf`. */
-function computeTotalTokens(transcript: Transcript): number {
+/** Last assistant `tokens.input` in the current session, plus what the next request adds
+ *  on top of it — that turn's own output (exact when the provider counted it) and its tool
+ *  results (always chars/4) — following `tokens.ts`'s `contextSizeOf` (DESIGN.md §3.3 /
+ *  §6.7). `estimated` is true only when a guess really is part of the figure. */
+function computeTotalTokens(transcript: Transcript): { tokens: number; estimated: boolean } {
   let lastIndex = -1
   let lastInput = 0
   transcript.messages.forEach((m, idx) => {
@@ -468,14 +536,22 @@ function computeTotalTokens(transcript: Transcript): number {
     }
   })
 
-  let newer = 0
-  for (let i = lastIndex + 1; i < transcript.messages.length; i++) {
+  // starts AT the last assistant: its `tokens.input` is the context it was *given*
+  let counted = 0
+  let guessed = 0
+  for (let i = Math.max(lastIndex, 0); i < transcript.messages.length; i++) {
     const m = transcript.messages[i]!
-    if (m.role === "user") newer += estimateTokens(userText(m))
-    else for (const p of m.parts) newer += estimateTokens(partText(p))
+    if (m.role === "user") {
+      guessed += estimateTokens(userText(m))
+      continue
+    }
+    // `tokens.output` covers what the model generated, never the tool results it read back
+    const output = m.tokens?.output
+    if (typeof output === "number") counted += output
+    for (const p of m.parts) if (p.type === "tool" || typeof output !== "number") guessed += estimateTokens(partText(p))
   }
 
-  return lastInput + newer
+  return { tokens: lastInput + counted + guessed, estimated: lastIndex === -1 || guessed > 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -484,10 +560,18 @@ function computeTotalTokens(transcript: Transcript): number {
 
 export function buildTreeView(o: BuildOptions): TreeView {
   const transcript = o.transcripts[o.currentSessionID]
-  if (!transcript) return { rows: [], indexById: {}, currentRowId: undefined, totalTokens: 0 }
+  if (!transcript) return { rows: [], indexById: {}, currentRowId: undefined, totalTokens: 0, totalEstimated: false }
 
   const ancestorChain = ancestorChainOf(o.state, o.currentSessionID)
-  const spineSessions = new Set([...ancestorChain, o.currentSessionID])
+  const spine = [...ancestorChain, o.currentSessionID]
+  const spineSessions = new Set(spine)
+  // every spine session but the root forks off the one above it: that fork point gets a
+  // marker row, so a session with no messages of its own still shows where it started
+  const spineMarkers = new Map<string, BranchState>()
+  for (const sessionID of spine.slice(1)) {
+    const branch = o.state.sessions[sessionID]
+    if (branch) spineMarkers.set(`${branch.parentSessionID}:${branch.anchorMessageID}`, branch)
+  }
 
   const ctx: Ctx = {
     state: o.state,
@@ -499,16 +583,21 @@ export function buildTreeView(o: BuildOptions): TreeView {
     crops: o.crops ?? [],
     anchorMap: buildAnchorMap(o.state),
     spineSessions,
+    spineMarkers,
+    placed: new Set<string>(),
   }
 
   const allRows: Row[] = []
   const counter = { turn: 0 }
+  // ancestors we fork away from, with the anchor we left them at (see emitElsewhere)
+  const ancestorTails: BranchLike[] = []
   // branches forked before the first message anchor on "" and sit above everything
   emitBranches(ctx, ancestorChain[0] ?? o.currentSessionID, "", 0, allRows)
   // Spine segments (see header comment). A missing ancestor transcript degrades to
   // rendering the current session's own copy of that prefix.
-  const spine = [...ancestorChain, o.currentSessionID]
   let from = 0 // index into the *current* session's transcript where the next segment starts
+  let depth = 0
+  let gutter = ""
   for (let s = 0; s < spine.length; s++) {
     const sessionID = spine[s]!
     const own = o.transcripts[sessionID]
@@ -519,8 +608,17 @@ export function buildTreeView(o: BuildOptions): TreeView {
       if (own && anchorIndex !== -1) {
         // this ancestor owns messages [from .. anchorIndex]
         const segment = own.messages.slice(from, anchorIndex + 1)
-        renderMessages(ctx, sessionID, segment, 0, "", allRows, counter, -1)
+        renderMessages(ctx, sessionID, segment, depth, gutter, allRows, counter, -1)
+        if (anchorIndex < own.messages.length - 1) {
+          ancestorTails.push({ sessionID, parentSessionID: sessionID, anchorMessageID: childBranch!.anchorMessageID, ancestor: true })
+        }
         from = anchorIndex + 1
+        // the marker row for the child was just emitted at the anchor: the rest of the path
+        // is drawn under it, like an expanded branch
+        if (branchAllowed(o.filter)) {
+          depth += 1
+          gutter = "│ "
+        }
         continue
       }
       // unknown anchor: let the next segment render from where we are, out of the copy
@@ -528,8 +626,9 @@ export function buildTreeView(o: BuildOptions): TreeView {
     }
     const segment = transcript.messages.slice(from)
     const lastUser = findLastUserIndex(segment)
-    renderMessages(ctx, sessionID, segment, 0, "", allRows, counter, lastUser)
+    renderMessages(ctx, sessionID, segment, depth, gutter, allRows, counter, lastUser)
   }
+  emitElsewhere(ctx, ancestorTails, allRows)
 
   const rows = o.search ? applySearch(allRows, o.search) : allRows
 
@@ -541,13 +640,16 @@ export function buildTreeView(o: BuildOptions): TreeView {
       break
     }
   }
+  // a fork with no messages of its own has nothing but its marker row
+  if (!currentRowId) currentRowId = rows.find((r) => r.kind === "branch" && r.isCurrent)?.id
 
   const indexById: Record<string, number> = {}
   rows.forEach((r, i) => {
     indexById[r.id] = i
   })
 
-  return { rows, indexById, currentRowId, totalTokens: computeTotalTokens(transcript) }
+  const total = computeTotalTokens(transcript)
+  return { rows, indexById, currentRowId, totalTokens: total.tokens, totalEstimated: total.estimated }
 }
 
 

@@ -5,7 +5,7 @@ Pi-style context tree for [OpenCode](https://opencode.ai), with the
 (`/branch`, `/merge`, `/crop`, `/undo`) and a DeepSeek-Harness-style trajectory view
 (timeline lanes, per-step tokens and timing, inspector) in one screen.
 
-**Status: working prototype, not yet on npm (see `docs/USAGE.md` and DESIGN.md §11).**
+**Status: 0.1.0 release candidate — not yet published to npm; install from a checkout (see `docs/USAGE.md`).**
 Branch, jump, labels, filters, search, crop + undo, squash/discard/tournament merge with a
 `$EDITOR` gate, the timeline lanes, inspector and consumers views, the gauge, and the headless
 `/ctree` commands all work against OpenCode 1.18 and are covered by pty-driven e2e tests
@@ -34,7 +34,9 @@ model, architecture, edge cases, and the roadmap.
 
 Rows are trajectory steps of the active path; the gutter draws branches at their
 anchors (git-log style); the lanes on top are DeepSeek Harness's Input / Model /
-Tools timeline; the right pane is its inspector.
+Tools timeline; the right pane is its inspector. Branches off the active path (siblings, the trunk's
+continuation) are listed below as `┆⎇` rows, and sessions made with OpenCode's own `/fork`
+are adopted into the tree automatically.
 
 ## Try it from source
 

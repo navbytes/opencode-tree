@@ -185,7 +185,7 @@ branch history), or `global` → `<opencode state dir>/plugins/opencode-context-
 | `type` | `data` | Meaning |
 |---|---|---|
 | `tree.created` | `{ rootSessionID }` | first time a session is touched by the plugin |
-| `branch.opened` | `{ sessionID, parentSessionID, anchorMessageID, name?, trunkModel?, branchModel?, kind: "explicit" \| "jump" \| "redo" }` | a fork we made (via `/branch`, or by jumping in the tree) |
+| `branch.opened` | `{ sessionID, parentSessionID, anchorMessageID, name?, trunkModel?, branchModel?, kind: "explicit" \| "jump" \| "redo" \| "native" }` | a fork we made (via `/branch`, or by jumping in the tree), or one of OpenCode's own `/fork` sessions adopted by matching its copied message prefix (`core/adopt.ts`) |
 | `branch.closed` | `{ sessionID, status: "squashed" \| "rejected" \| "discarded" \| "abandoned", decisionMessageID?, note? }` | `/merge` result or undo of `/branch` |
 | `summary.recorded` | `{ sessionID, messageID, fromSessionID, fromMessageID }` | a Pi-style auto summary injected on jump (◇, unreviewed) |
 | `decision.recorded` | `{ sessionID, messageID, forkSessionID, branchName, siblings: [{ name, reason }] }` | the ◆ record message we wrote into the trunk |
@@ -236,9 +236,11 @@ cross-session assembly is ever needed for the model — only for the picture.
 | `/merge [--pick \| --no-llm \| --discard [note] \| --tournament]` | TUI (needs the editor gate) | `/ctree merge --discard` only, headless | close the nearest open branch containing the current session |
 | `/crop [--top \| --auto [--apply] \| --dry-run \| --min-tokens N \| --older-than N \| --keep glob]` | TUI (interactive) / server (`--auto --apply`, `--top` with confirm) | `/ctree crop …` | stub fat results or drop whole Q&A turns, as a view |
 | `/undo` | TUI | `/ctree undo` | revert the last active mutation (branch / merge / crop) |
-| `/decisions [--export path]` | TUI | `/ctree decisions` prints text | decisions view / markdown export |
+| `/decisions [--export path]` | TUI | `/ctree decisions [--export [path]]` (default `./ctree-decisions.md`) | decisions view / markdown export |
 | `/label [text]` | TUI | — | bookmark the selected (or last) message |
-| `/gauge bar\|off` | TUI | — | gauge placement |
+
+The gauge is not command-driven: it renders in the `session_prompt_right` TUI slot
+(always on); an earlier `/gauge bar\|off` placement command was dropped in M6.
 
 Rationale for the split: server-side custom commands *always* run a model turn
 (`command.execute.before` cannot suppress it and throwing crashes the TUI), so
@@ -435,7 +437,9 @@ the branch structure (ancestry axis). That is the layout:
 - **rows = trajectory steps** of the active path (turn markers, role glyph, preview,
   tokens, duration, ⚠ for ≥10k, ✂ if cropped, ◆ for decisions);
 - **gutter = tree**: at each anchor a branch row `⎇ name (status · turns · ~tokens)`
-  is drawn with `├⎇` / `╰⎇`; `e`/`→` expands it inline (its steps appear indented under
+  is drawn with `├⎇` / `╰⎇` (branches that are not on the active path — siblings, the
+  trunk's continuation past your fork point — are listed at the bottom as `┆⎇` rows);
+  `e`/`→` expands it inline (its steps appear indented under
   the anchor, drawn with `│`), `←` folds it. Only the active path is expanded by
   default, exactly like Pi orders the active branch first and DSH keeps one linear
   list;
