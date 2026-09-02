@@ -1,0 +1,59 @@
+{
+  "name": "opencode-context-tree",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Pi-style context tree for OpenCode: /branch, /merge, /crop, /undo, with a combined tree + trajectory view.",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./src/server/index.ts",
+      "import": "./dist/server.js"
+    },
+    "./server": {
+      "types": "./src/server/index.ts",
+      "import": "./dist/server.js"
+    },
+    "./tui": {
+      "types": "./src/tui/index.tsx",
+      "import": "./dist/tui.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json",
+    "test": "bun test"
+  },
+  "engines": {
+    "opencode": ">=1.18.0"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.26",
+    "@opencode-ai/sdk": "1.18.26",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@opentui/core": "^0.5.10",
+    "@opentui/keymap": "^0.5.10",
+    "@opentui/solid": "^0.5.10",
+    "@types/bun": "latest",
+    "solid-js": "^1.9.12",
+    "typescript": "^5.8.2"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.5.10",
+    "@opentui/keymap": ">=0.5.10",
+    "@opentui/solid": ">=0.5.10",
+    "solid-js": ">=1.9.12"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/core": { "optional": true },
+    "@opentui/keymap": { "optional": true },
+    "@opentui/solid": { "optional": true },
+    "solid-js": { "optional": true }
+  }
+}
