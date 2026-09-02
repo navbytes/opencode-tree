@@ -50,6 +50,9 @@ export const SummaryRecordedData = z.object({
 export type SummaryRecordedData = z.infer<typeof SummaryRecordedData>
 
 export const DecisionRecordedData = z.object({
+  /** The record text as landed in the trunk (kept here so compaction re-injection and the
+   *  decisions view need no OpenCode round-trip). */
+  text: z.string().optional(),
   sessionID: z.string(),
   messageID: z.string(),
   forkSessionID: z.string(),
@@ -187,6 +190,11 @@ export type DecisionState = {
   forkSessionID: string
   branchName: string
   siblings: { name: string; reason?: string }[]
+  text?: string
+  /** True once the branch it closed was re-opened by /undo: the message stays on screen
+   *  but the server hides it from the model (DESIGN.md §12 decision 4). */
+  hidden: boolean
+  recordedAt: number
 }
 
 export type TreeState = {
@@ -233,6 +241,11 @@ export function foldJournal(entries: JournalEntry[], treeId = "default"): TreeSt
       }
       case "branch.opened": {
         const d = entry.data
+        const previous = state.sessions[d.sessionID]
+        if (previous?.decisionMessageID) {
+          const decision = state.decisions[previous.decisionMessageID]
+          if (decision) decision.hidden = true
+        }
         state.sessions[d.sessionID] = {
           sessionID: d.sessionID,
           parentSessionID: d.parentSessionID,
@@ -253,6 +266,10 @@ export function foldJournal(entries: JournalEntry[], treeId = "default"): TreeSt
           branch.status = entry.data.status
           branch.decisionMessageID = entry.data.decisionMessageID
           branch.note = entry.data.note
+          if (entry.data.decisionMessageID) {
+            const decision = state.decisions[entry.data.decisionMessageID]
+            if (decision) decision.hidden = false
+          }
         }
         break
       }
@@ -269,6 +286,9 @@ export function foldJournal(entries: JournalEntry[], treeId = "default"): TreeSt
           forkSessionID: d.forkSessionID,
           branchName: d.branchName,
           siblings: d.siblings,
+          text: d.text,
+          hidden: false,
+          recordedAt: entry.ts,
         }
         break
       }

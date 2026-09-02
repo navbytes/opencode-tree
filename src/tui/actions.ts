@@ -7,6 +7,8 @@ import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { JournalStore } from "../shared/store.js"
 import type { CropAppliedData } from "../core/journal.js"
 import type { UndoPlan } from "../core/undo.js"
+import { DECISION_SYSTEM, branchTranscriptText, buildDecisionDraftPrompt, decisionMessageText, decisionTemplate, openSiblings } from "../core/decision.js"
+import { editInExternalEditor, hasEditor } from "./editor.js"
 import { debug } from "../shared/debug.js"
 
 export type JumpPlan =
@@ -272,4 +274,119 @@ export async function executeUndo(ctx: ActionContext, sessionID: string, plan: U
       return plan.sessionID
     }
   }
+}
+
+/** Run one prompt in a throw-away helper session and return the assistant text. */
+export async function draftWithHelper(ctx: ActionContext, input: { title: string; system: string; prompt: string; model?: { providerID: string; modelID: string } }): Promise<string> {
+  const helper = await ctx.api.client.session.create({ directory: ctx.directory, title: input.title })
+  const helperID = (helper.data as any)?.id as string | undefined
+  if (!helperID) throw new Error("could not create helper session")
+  try {
+    const reply = await ctx.api.client.session.prompt({ sessionID: helperID, directory: ctx.directory, system: input.system, model: input.model, parts: [{ type: "text", text: input.prompt }] })
+    const text = ((reply.data as any)?.parts as any[] | undefined)
+      ?.filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
+      .map((p) => p.text)
+      .join("")
+      .trim()
+    if (!text) throw new Error("the model returned no text")
+    return text
+  } finally {
+    await ctx.api.client.session.delete({ sessionID: helperID, directory: ctx.directory }).catch(() => undefined)
+  }
+}
+
+export type MergeMode = "squash" | "squash-no-llm" | "discard" | "tournament"
+
+export type MergeInput = {
+  sessionID: string
+  mode: MergeMode
+  note?: string
+  /** how to confirm the record: external editor (default) or a pre-confirmed text */
+  confirm?: (draft: string) => Promise<string | undefined>
+}
+
+/** Close the branch the session lives on (DESIGN.md §6.4). Returns the parent session id. */
+export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promise<string | undefined> {
+  const treeId = ctx.store.ensureTree(input.sessionID, "tui")
+  const state = ctx.store.stateFor(treeId)
+  const branch = state.sessions[input.sessionID]
+  if (!branch || branch.status !== "open") throw new Error("this session is not an open branch")
+  const parentID = branch.parentSessionID
+  const name = branch.name ?? "branch"
+  debug("merge.start", { mode: input.mode, sessionID: input.sessionID, parentID })
+  await abortIfBusy(ctx, input.sessionID)
+
+  if (input.mode === "discard") {
+    ctx.store.record(treeId, "branch.closed", { sessionID: input.sessionID, status: "rejected", note: input.note }, "tui")
+    await mirrorMetadata(ctx, input.sessionID, { status: "rejected" })
+    navigateToSession(ctx, parentID)
+    ctx.api.ui.toast({ variant: "success", message: `⎇ ${name} discarded — back on the trunk` })
+    return parentID
+  }
+
+  // --- draft ---------------------------------------------------------------
+  const parentMsgs = await ctx.api.client.session.messages({ sessionID: parentID, directory: ctx.directory })
+  const anchorIndex = ((parentMsgs.data as any[]) ?? []).findIndex((m) => m.info.id === branch.anchorMessageID)
+  const own = await fetchOwnTranscript(ctx, input.sessionID)
+  const transcript = branchTranscriptText(own, anchorIndex)
+  const model = branch.branchModel ?? branch.trunkModel
+  const modelRef = model ? { providerID: model.split("/")[0]!, modelID: model.split("/").slice(1).join("/") } : undefined
+  const siblingIDs = input.mode === "tournament" ? openSiblings(state, input.sessionID) : []
+  const siblings = await Promise.all(
+    siblingIDs.map(async (id) => {
+      const tr = await fetchOwnTranscript(ctx, id)
+      const b = state.sessions[id]!
+      const idx = ((parentMsgs.data as any[]) ?? []).findIndex((m) => m.info.id === b.anchorMessageID)
+      return { name: b.name ?? id, transcript: branchTranscriptText(tr, idx, 800) }
+    }),
+  )
+  let draft: string
+  if (input.mode === "squash-no-llm") {
+    draft = decisionTemplate(name, model)
+  } else {
+    ctx.api.ui.toast({ message: `drafting the decision record for ⎇ ${name}…` })
+    draft = await draftWithHelper(ctx, { title: `Context tree: draft for ${name}`, system: DECISION_SYSTEM, prompt: buildDecisionDraftPrompt({ branchName: name, model, transcript, siblings }), model: modelRef })
+  }
+  debug("merge.drafted", { chars: draft.length })
+
+  // --- gate ----------------------------------------------------------------
+  const confirm = input.confirm ?? ((d: string) => editInExternalEditor(ctx.api.renderer as any, d, ctx.directory))
+  if (!input.confirm && !hasEditor()) throw new Error("no $EDITOR configured — set VISUAL/EDITOR, or use the in-app confirm")
+  const confirmed = await confirm(draft)
+  if (!confirmed) {
+    ctx.api.ui.toast({ variant: "warning", message: "merge aborted — nothing written" })
+    return undefined
+  }
+
+  // --- land ----------------------------------------------------------------
+  const text = decisionMessageText(confirmed, name)
+  const landed = await ctx.api.client.session.prompt({
+    sessionID: parentID,
+    directory: ctx.directory,
+    noReply: true,
+    parts: [{ type: "text", text, metadata: { ctree: { kind: "decision", forkSessionID: input.sessionID, branchName: name } } }],
+  })
+  const messageID = String((landed.data as any)?.info?.id ?? (landed.data as any)?.id ?? "")
+  if (!messageID) throw new Error("could not write the decision record into the trunk")
+  ctx.store.record(treeId, "decision.recorded", { sessionID: parentID, messageID, forkSessionID: input.sessionID, branchName: name, siblings: siblings.map((s) => ({ name: s.name })), text }, "tui")
+  ctx.store.record(treeId, "branch.closed", { sessionID: input.sessionID, status: "squashed", decisionMessageID: messageID }, "tui")
+  for (const id of siblingIDs) ctx.store.record(treeId, "branch.closed", { sessionID: id, status: "rejected", note: `lost tournament to ${name}` }, "tui")
+  await mirrorMetadata(ctx, input.sessionID, { status: "squashed", decisionMessageID: messageID })
+  for (const id of siblingIDs) await mirrorMetadata(ctx, id, { status: "rejected" })
+  debug("merge.landed", { messageID, siblings: siblingIDs.length })
+  navigateToSession(ctx, parentID)
+  ctx.api.ui.toast({ variant: "success", message: `◆ merged ⎇ ${name}${siblingIDs.length ? ` (+${siblingIDs.length} sibling${siblingIDs.length === 1 ? "" : "s"} closed)` : ""}` })
+  return parentID
+}
+
+async function fetchOwnTranscript(ctx: ActionContext, sessionID: string) {
+  const res = await ctx.api.client.session.messages({ sessionID, directory: ctx.directory })
+  const messages = ((res.data as any[]) ?? []).map((m) => ({
+    id: m.info.id as string,
+    role: (m.info.role === "user" ? "user" : "assistant") as "user" | "assistant",
+    time: m.info.time,
+    tokens: m.info.tokens,
+    parts: (m.parts as any[]).map((p) => ({ id: p.id, type: p.type, text: p.text, tool: p.tool, callID: p.callID, state: p.state, time: p.time, metadata: p.metadata })),
+  }))
+  return { sessionID, title: sessionID, status: "available" as const, messages }
 }

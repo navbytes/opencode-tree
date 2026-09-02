@@ -12,7 +12,11 @@ import { bandFor } from "../core/tokens.js"
 import { buildTreeView, type Filter, type Row } from "../core/tree.js"
 import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
-import { applyCrop, createNamedBranch, executeJump, executeUndo, setLabel, type ActionContext, type SummaryChoice } from "./actions.js"
+import { applyCrop, createNamedBranch, executeJump, executeUndo, mergeBranch, setLabel, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
+import { exportDecisions } from "../core/decision.js"
+import { hasEditor } from "./editor.js"
+import fs from "node:fs"
+import path from "node:path"
 import { autoMark, planResultCrop, planTurnCrops, reclaimed, resultCandidates, turnCandidates, type ResultCandidate, type TurnCandidate } from "../core/cropplan.js"
 import { planUndo } from "../core/undo.js"
 import { fetchTranscript, liveTranscript } from "./transcripts.js"
@@ -24,6 +28,8 @@ export type TreeRouteProps = {
   directory: string
   sessionID?: string
   options: { jumpSummary: "ask" | "never" }
+  /** open directly on a secondary view */
+  initialView?: "tree" | "decisions"
 }
 
 const BAND_KEY = { low: "success", healthy: "success", filling: "warning", red: "error" } as const
@@ -92,6 +98,8 @@ export function TreeRoute(props: TreeRouteProps) {
   const [others, setOthers] = createSignal<Record<string, Transcript>>({})
   const [busy, setBusy] = createSignal<string | undefined>()
   const [cropMode, setCropMode] = createSignal<"result" | "turn" | undefined>()
+  const [panel, setPanel] = createSignal<"tree" | "decisions">(props.initialView ?? "tree")
+  const [decisionIndex, setDecisionIndex] = createSignal(0)
   const [marked, setMarked] = createSignal<Set<string>>(new Set())
 
   const state = createMemo<TreeState>(() => {
@@ -489,10 +497,75 @@ export function TreeRoute(props: TreeRouteProps) {
     api.kv.set(`ctree.expanded.${sessionID}`, [...next])
   }
 
+  const decisions = createMemo(() =>
+    Object.values(state().decisions)
+      .sort((a, b) => a.recordedAt - b.recordedAt),
+  )
+
+  function select<T>(title: string, options: { title: string; value: T; description?: string }[]): Promise<T | undefined> {
+    return new Promise((resolve) => {
+      api.ui.dialog.replace(
+        () =>
+          api.ui.DialogSelect<T>({
+            title,
+            options,
+            onSelect: (o) => {
+              resolve(o.value)
+              api.ui.dialog.clear()
+            },
+          }),
+        () => resolve(undefined),
+      )
+    })
+  }
+
+  async function merge() {
+    if (!sessionID) return
+    const b = branchOfCurrent()
+    if (!b || b.status !== "open") {
+      api.ui.toast({ message: "not on an open branch — /branch first, or open the tree from a branch" })
+      return
+    }
+    const mode = await select<MergeMode>(`Merge ⎇ ${b.name ?? "branch"} into its parent`, [
+      { title: "Squash", value: "squash", description: hasEditor() ? "model drafts a ◆ decision record → your $EDITOR → confirm by saving" : "model drafts a ◆ decision record → accept in-app (no $EDITOR set)" },
+      { title: "Squash without LLM", value: "squash-no-llm", description: "empty template → your editor" },
+      { title: "Discard", value: "discard", description: "back to the parent; branch marked rejected; nothing written" },
+      { title: "Tournament", value: "tournament", description: "this branch wins; open siblings get epitaphs and are closed" },
+    ])
+    if (!mode) return
+    let note: string | undefined
+    if (mode === "discard") note = (await prompt("Why? (optional note on the close marker)", "dead end")) ?? undefined
+    const inApp = !hasEditor()
+      ? async (draft: string) => {
+          const ok = await confirm("Accept the drafted record as-is?", `${draft.slice(0, 400)}${draft.length > 400 ? "…" : ""}\n\n(set $EDITOR to review it in your editor)`)
+          return ok ? draft : undefined
+        }
+      : undefined
+    await guarded("merge", async () => {
+      await mergeBranch(ctx, { sessionID, mode, note, confirm: inApp })
+    })
+  }
+
+  function exportDecisionsFile() {
+    const records = decisions().filter((d) => d.text).map((d) => ({ branchName: d.branchName, text: d.text!, sessionID: d.sessionID, at: d.recordedAt }))
+    const file = path.join(directory, "ctree-decisions.md")
+    fs.writeFileSync(file, exportDecisions(records))
+    api.ui.toast({ variant: "success", message: `wrote ${records.length} record${records.length === 1 ? "" : "s"} → ${file}` })
+  }
+
+  function jumpToDecision() {
+    const d = decisions()[decisionIndex()]
+    if (!d) return
+    const idx = view().rows.findIndex((r) => r.kind !== "branch" && r.messageID === d.messageID)
+    setPanel("tree")
+    if (idx >= 0) setSelected(idx)
+    else api.ui.toast({ message: "that record lives in another session" })
+  }
+
   const off = api.keymap.registerLayer({
     commands: [
-      { name: "ctree.up", hidden: true, run: () => setSelected((i) => moveSelection(view().rows, i, -1)) },
-      { name: "ctree.down", hidden: true, run: () => setSelected((i) => moveSelection(view().rows, i, 1)) },
+      { name: "ctree.up", hidden: true, run: () => (panel() === "decisions" ? setDecisionIndex((i) => Math.max(0, i - 1)) : setSelected((i) => moveSelection(view().rows, i, -1))) },
+      { name: "ctree.down", hidden: true, run: () => (panel() === "decisions" ? setDecisionIndex((i) => Math.min(Math.max(0, decisions().length - 1), i + 1)) : setSelected((i) => moveSelection(view().rows, i, 1))) },
       { name: "ctree.jump_up", hidden: true, run: () => setSelected((i) => moveSelection(view().rows, i, -20)) },
       { name: "ctree.jump_down", hidden: true, run: () => setSelected((i) => moveSelection(view().rows, i, 20)) },
       { name: "ctree.first", hidden: true, run: () => setSelected(0) },
@@ -502,7 +575,7 @@ export function TreeRoute(props: TreeRouteProps) {
       { name: "ctree.fold", hidden: true, run: () => foldOrUnfold(false) },
       { name: "ctree.unfold", hidden: true, run: () => foldOrUnfold(true) },
       { name: "ctree.toggle", hidden: true, run: () => foldOrUnfold(!(current()?.kind === "branch" && (current() as Row & { kind: "branch" }).expanded)) },
-      { name: "ctree.go", hidden: true, run: () => void (cropMode() ? applyMarked() : jump()) },
+      { name: "ctree.go", hidden: true, run: () => void (panel() === "decisions" ? jumpToDecision() : cropMode() ? applyMarked() : jump()) },
       { name: "ctree.branch", hidden: true, run: () => void branch() },
       { name: "ctree.label", hidden: true, run: () => void label() },
       {
@@ -544,10 +617,17 @@ export function TreeRoute(props: TreeRouteProps) {
       { name: "ctree.mark", hidden: true, enabled: () => Boolean(cropMode()), run: () => toggleMark() },
       { name: "ctree.auto", hidden: true, enabled: () => Boolean(cropMode()), run: () => autoMarkAll() },
       { name: "ctree.undo", hidden: true, run: () => void undo() },
+      { name: "ctree.merge", hidden: true, run: () => void merge() },
+      { name: "ctree.decisions", hidden: true, run: () => setPanel(panel() === "decisions" ? "tree" : "decisions") },
+      { name: "ctree.export", hidden: true, enabled: () => panel() === "decisions", run: () => exportDecisionsFile() },
       {
         name: "ctree.back",
         hidden: true,
         run: () => {
+          if (panel() === "decisions") {
+            setPanel("tree")
+            return
+          }
           if (cropMode()) {
             setCropMode(undefined)
             setMarked(new Set<string>())
@@ -582,6 +662,9 @@ export function TreeRoute(props: TreeRouteProps) {
       { key: "space", cmd: "ctree.mark" },
       { key: "a", cmd: "ctree.auto" },
       { key: "x", cmd: "ctree.undo" },
+      { key: "m", cmd: "ctree.merge" },
+      { key: "shift+d", cmd: "ctree.decisions" },
+      { key: "shift+e", cmd: "ctree.export" },
       { key: "shift+l", cmd: "ctree.label" },
       { key: "f", cmd: "ctree.filter" },
       { key: "/", cmd: "ctree.search" },
@@ -608,10 +691,30 @@ export function TreeRoute(props: TreeRouteProps) {
         {search() ? `   search: "${search()}"` : ""}
         {busy() ? `   … ${busy()}` : ""}   {view().rows.length} rows
       </text>
-      <Show when={view().rows.length === 0}>
+      <Show when={panel() === "decisions"}>
+        <text fg={t.accent}>│ ◆ decisions on this tree ({decisions().length}) · ⏎ jump to record · E export markdown · D back</text>
+        <Show when={decisions().length === 0}>
+          <text fg={t.textMuted}>│ (none yet — /merge a branch to write one)</text>
+        </Show>
+        <For each={decisions()}>
+          {(d, i) => {
+            const sel = () => i() === decisionIndex()
+            const lines = () => (d.text ?? "").split("\n").slice(0, sel() ? 12 : 1)
+            return (
+              <box flexDirection="column">
+                <text fg={sel() ? t.selectedListItemText : t.accent} bg={sel() ? t.backgroundElement : undefined}>
+                  {sel() ? "›" : "│"} {d.hidden ? "◇ (hidden from model) " : "◆ "}{d.branchName}  · {new Date(d.recordedAt).toISOString().slice(0, 16).replace("T", " ")}{d.siblings.length ? ` · ✗ ${d.siblings.map((x) => x.name).join(", ")}` : ""}
+                </text>
+                <For each={sel() ? lines().slice(1) : []}>{(l) => <text fg={t.text}>│    {l.slice(0, width() - 6)}</text>}</For>
+              </box>
+            )
+          }}
+        </For>
+      </Show>
+      <Show when={panel() === "tree" && view().rows.length === 0}>
         <text fg={t.textMuted}>│ (no messages yet — chat first, then open the tree)</text>
       </Show>
-      <For each={visible()}>
+      <For each={panel() === "tree" ? visible() : []}>
         {(row, i) => {
           const isSel = () => windowStart() + i() === selected()
           const color = () =>
@@ -633,7 +736,7 @@ export function TreeRoute(props: TreeRouteProps) {
         }}
       </For>
       <text fg={t.textMuted}>
-        └ ⏎ go here  b branch  c crop  x undo  L label  ←→ fold  [ ] branches  f filter  / search  g/G  q back
+        └ ⏎ go  b branch  m merge  c crop  x undo  D decisions  L label  ←→ fold  [ ] branches  f filter  / search  q back
       </text>
     </box>
   )

@@ -8,7 +8,8 @@ import { createMemo } from "solid-js"
 import { bandFor, contextSizeOf, type MinimalMessage, type MinimalPart } from "../core/tokens.js"
 import { JournalStore, type StorageMode } from "../shared/store.js"
 import { debug } from "../shared/debug.js"
-import { createNamedBranch, setLabel } from "./actions.js"
+import { createNamedBranch, mergeBranch, setLabel, type MergeMode } from "./actions.js"
+import { hasEditor } from "./editor.js"
 import { TreeRoute, formatK } from "./route.js"
 
 const BAND_COLOR = { low: "success", healthy: "success", filling: "warning", red: "error" } as const
@@ -140,11 +141,101 @@ const tui: TuiPlugin = async (api, rawOptions) => {
     bindings: [{ key: "ctrl+q", cmd: "ctree.open" }],
   })
 
+  api.keymap.registerLayer({
+    commands: [
+      {
+        namespace: "palette",
+        name: "ctree.merge",
+        title: "Merge branch",
+        description: "Close this branch: squash to a ◆ decision record, discard, or tournament",
+        category: "Context",
+        slashName: "merge",
+        enabled: () => Boolean(currentSession(api)),
+        run: detached(async () => {
+          const sessionID = currentSession(api)
+          if (!sessionID) return
+          await new Promise((r) => setTimeout(r, 30))
+          const branch = store.stateForSession(sessionID)?.sessions[sessionID]
+          if (!branch || branch.status !== "open") {
+            api.ui.toast({ message: "not on an open branch — /branch first" })
+            return
+          }
+          const mode = await new Promise<MergeMode | undefined>((resolve) => {
+            api.ui.dialog.replace(
+              () =>
+                api.ui.DialogSelect<MergeMode>({
+                  title: `Merge ⎇ ${branch.name ?? "branch"}`,
+                  options: [
+                    { title: "Squash", value: "squash", description: hasEditor() ? "draft → $EDITOR → save to confirm" : "draft → accept in-app" },
+                    { title: "Squash without LLM", value: "squash-no-llm" },
+                    { title: "Discard", value: "discard" },
+                    { title: "Tournament", value: "tournament" },
+                  ],
+                  onSelect: (o) => {
+                    resolve(o.value)
+                    api.ui.dialog.clear()
+                  },
+                }),
+              () => resolve(undefined),
+            )
+          })
+          if (!mode) return
+          const inApp = !hasEditor()
+            ? async (draft: string) =>
+                new Promise<string | undefined>((resolve) => {
+                  api.ui.dialog.replace(
+                    () =>
+                      api.ui.DialogConfirm({
+                        title: "Accept the drafted record as-is?",
+                        message: `${draft.slice(0, 400)}${draft.length > 400 ? "…" : ""}`,
+                        onConfirm: () => {
+                          resolve(draft)
+                          api.ui.dialog.clear()
+                        },
+                        onCancel: () => {
+                          resolve(undefined)
+                          api.ui.dialog.clear()
+                        },
+                      }),
+                    () => resolve(undefined),
+                  )
+                })
+            : undefined
+          try {
+            await mergeBranch({ api, store, directory }, { sessionID, mode, confirm: inApp })
+          } catch (e) {
+            api.ui.toast({ variant: "error", message: `merge: ${e instanceof Error ? e.message : String(e)}` })
+          }
+        }),
+      },
+      {
+        namespace: "palette",
+        name: "ctree.decisions",
+        title: "Decisions",
+        description: "◆ decision records on this tree",
+        category: "Context",
+        slashName: "decisions",
+        run: () => {
+          const sessionID = currentSession(api)
+          api.route.navigate("ctree", sessionID ? { sessionID, view: "decisions" } : { view: "decisions" })
+          api.ui.dialog.clear()
+        },
+      },
+    ],
+  })
+
   api.route.register([
     {
       name: "ctree",
       render: ({ params }) => (
-        <TreeRoute api={api} store={store} directory={directory} sessionID={params?.["sessionID"] as string | undefined} options={{ jumpSummary: options.jumpSummary }} />
+        <TreeRoute
+          api={api}
+          store={store}
+          directory={directory}
+          sessionID={params?.["sessionID"] as string | undefined}
+          options={{ jumpSummary: options.jumpSummary }}
+          initialView={params?.["view"] === "decisions" ? "decisions" : "tree"}
+        />
       ),
     },
   ])

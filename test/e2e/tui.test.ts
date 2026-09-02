@@ -81,6 +81,51 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
     }
   }, 300_000)
 
+  test("/branch, /merge (squash via $EDITOR) lands a ◆ record in the trunk; undo re-opens", async () => {
+    const m = await startMock({ tool: false })
+    const proj = await createProject({ mockPort: m.port })
+    await installPlugins({ projectDir: proj.dir, server: [path.join(REPO_ROOT, "dist", "server.js")], tui: [path.join(REPO_ROOT, "dist", "tui.js")] })
+    try {
+      await runTui({
+        projectDir: proj.dir,
+        env: { EDITOR: path.join(REPO_ROOT, "harness", "fake-editor.sh"), SPIKE_LOG: path.join(proj.dir, "editor.log") },
+        keys: [
+          ["Ask anything", 1, "hello\\r"],
+          ["mock reply", 1, "/branch"],
+          ["Branch here", 0.5, "\\r"],
+          ["Branch name", 2, "fix-flaky"],
+          ["Branch name", 3, "\\r"],
+          ["opened", 1, "second question\\r"],
+          ["opened", 8, "/merge"],
+          ["Merge branch", 0.5, "\\r"],
+          ["Merge ⎇", 1.5, "\\r"],
+          ["merged", 3, "third\\r"],
+          ["merged", 12, "/tree"],
+          ["merged", 13, "\\r"],
+          ["merged", 16, "x"],
+          ["Undo?", 1.5, "\\r"],
+          ["Undo?", 5, "\\x03"],
+          ["Undo?", 6, "\\x03"],
+        ],
+        timeoutSec: 240,
+        cols: 130,
+        rows: 34,
+        exitWhenDone: true,
+      })
+      const users = m.requests().map((r) => (r.body.messages as { role: string; content: unknown }[]).filter((x) => x.role === "user").map((x) => String(x.content)))
+      const withRecord = users.find((u) => u.some((c) => c.startsWith("◆ ## Decision: fix-flaky")))
+      expect(withRecord).toBeDefined()
+      expect(withRecord!.some((c) => c.includes("EDITED-BY-FAKE-EDITOR"))).toBe(true)
+      const dir = path.join(proj.dir, ".opencode", "context-tree")
+      const lines = readFileSync(path.join(dir, readdirSync(dir).find((f) => f.endsWith(".jsonl"))!), "utf8")
+      for (const t of ["decision.recorded", "branch.closed"]) expect(lines).toContain(`"type":"${t}"`)
+      expect(lines.split('"type":"branch.opened"').length - 1).toBe(2) // opened, squashed, re-opened by undo
+    } finally {
+      await m.stop()
+      await proj.cleanup()
+    }
+  }, 320_000)
+
   test("/tree opens the context tree route with rows and a context header", async () => {
     const text = await runTui({
       projectDir: project.dir,

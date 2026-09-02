@@ -5,7 +5,11 @@ Pi-style context tree for [OpenCode](https://opencode.ai), with the
 (`/branch`, `/merge`, `/crop`, `/undo`) and a DeepSeek-Harness-style trajectory view
 (timeline lanes, per-step tokens and timing, inspector) in one screen.
 
-**Status: design phase, decisions made (see DESIGN.md §12).** Read [DESIGN.md](./DESIGN.md) — it contains the research
+**Status: working prototype (M0–M4 done, see `docs/M0.md` and the roadmap in DESIGN.md §11).**
+Branch, jump, labels, filters, search, crop + undo, and squash/discard/tournament merge
+with a `$EDITOR` gate all work against OpenCode 1.18 and are covered by pty-driven e2e
+tests (`bun run test:e2e`). Not yet: the timeline minimap, the inspector pane,
+the consumers view, an npm release. Read [DESIGN.md](./DESIGN.md) — it contains the research
 (Pi, `pi-context-tree`, OpenCode plugin/SDK surface, existing plugins, DSH
 trajectory), the end-user flows, the combined tree + trajectory mockup, the data
 model, architecture, edge cases, and the roadmap.
@@ -32,7 +36,20 @@ Rows are trajectory steps of the active path; the gutter draws branches at their
 anchors (git-log style); the lanes on top are DeepSeek Harness's Input / Model /
 Tools timeline; the right pane is its inspector.
 
-## Planned commands
+## Try it from source
+
+```sh
+bun install && bun run build
+# opencode.json  →  "plugin": ["/abs/path/opencode-tree/dist/server.js"]
+# tui.json       →  "plugin": ["/abs/path/opencode-tree/dist/tui.js"]
+```
+
+Keys inside `/tree`: `⏎` go here · `b` branch · `m` merge · `c` crop mode (`space` mark,
+double for protected, `a` auto, `t` result⇄turn, `⏎` apply) · `x` undo · `D` decisions
+(`E` export) · `L` label · `←→` fold/unfold · `[ ]` hop branches · `f` filter · `/` search ·
+`g/G` · `q`.
+
+## Commands
 
 | Command | What it does |
 |---|---|
