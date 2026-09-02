@@ -2,3 +2,12 @@ node_modules/
 dist/
 .opencode/context-tree/
 *.tgz
+harness/env/
+harness/node_modules/
+harness/project/.git/
+harness/project/.opencode/plugins/*.js
+harness/*.log
+harness/*.jsonl
+harness/*.out*
+harness/t?.json
+harness/package*.json

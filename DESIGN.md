@@ -86,7 +86,7 @@ export default { id: "opencode-context-tree", server: async ({ client, directory
   "experimental.chat.system.transform":   async ({ sessionID, model }, out) => { /* add one paragraph about ◆/✂ markers */ },
   "experimental.session.compacting":      async ({ sessionID }, out) => { out.context.push(/* decisions on path */) },
   "command.execute.before":               async ({ command, sessionID, arguments: args }, out) => { /* headless /ctree … */ },
-  "chat.message":                          async (input, out) => { /* optional: branch model override [verify] */ },
+  "chat.message":                          async (input, out) => { /* branch model override (verified M0) */ },
   config: async (cfg) => { cfg.command["ctree"] = { template: "", description: "…" } /* DCP pattern */ },
   event: async ({ event }) => { /* session.deleted, message.removed, session.compacted → journal upkeep */ },
 })}
@@ -142,10 +142,14 @@ export default { id: "opencode-context-tree", tui: async (api, options, meta) =>
   file, `renderer.resume()`. That is the merge editor gate.
 - Slots available to plugins: `session_prompt_right`, `sidebar_title/content/footer`,
   `app_bottom`, `home_*`.
-- Declared in **`tui.json`** `"plugin": ["pkg", ["pkg", {…}]]`, installed with
-  `opencode plugin <pkg> [--global]`. Peer deps `@opentui/{core,keymap,solid} ≥ 0.4.5`;
-  JSX compiled with `@jsxImportSource @opentui/solid`. *[verify at M0]* whether the
-  1.18 TUI also picks up `tui` exports of packages listed in `opencode.json`.
+- Declared **only** in `tui.json` `"plugin": ["pkg", ["pkg", {…}], "./relative/file.js"]`
+  (global, `OPENCODE_TUI_CONFIG`, project, `.opencode/tui.json`); installed with
+  `opencode plugin <pkg> [--global]`. The TUI never scans `.opencode/plugins/` and the
+  server glob is `*.{ts,js}` only, so a package ships two entry points (`./server`,
+  `./tui`) and needs one line in `opencode.json` and one in `tui.json` (verified in M0,
+  see `docs/M0.md`). Peer deps `@opentui/{core,keymap,solid}`; JSX must be compiled
+  with `@opentui/solid/bun-plugin` and `solid-js` / `@opentui/*` left external, because
+  the host provides them (bundling `solid-js` pulls its server build and breaks).
 - Known bug to design around: DialogSelect `onSelect` on Enter (anomalyco/opencode
   #22610) — use our own list component inside the route, not `DialogSelect`, for the
   main tree.
@@ -310,9 +314,9 @@ the branch point is a named checkpoint in the tree.
 
 Model switch: the TUI's model picker is per-TUI state, not per-session; the branch
 model is applied by the server half in `chat.message` by overriding
-`output.message.model` for sessions whose journal entry has `branchModel` *[verify at
-M0 that the loop honours the stored `message.model`]*. Fallback: `tui.executeCommand`
-to open the model dialog with a hint, or document "pick the model manually".
+`output.message.model` for sessions whose journal entry has `branchModel`. Verified in
+M0: the hook's message is persisted before the loop reads it, and the provider request
+used the overridden model.
 
 ### 6.4 `/merge` — squash (default), discard, tournament
 
@@ -590,7 +594,7 @@ packages/
 |---|---|---|---|---|---|
 | Tree of branches | in-file | in-file | none (flat forks) | tree of sessions | tree of sessions + trajectory |
 | Jump to any node | ✓ | ✓ | `/fork` (user msgs only) | ✓ | ✓ (fork or switch) |
-| Named branch, model per branch | ✗ / ✗ | ✓ / ✓ | ✗ | ✗ | ✓ / ✓ *[verify]* |
+| Named branch, model per branch | ✗ / ✗ | ✓ / ✓ | ✗ | ✗ | ✓ / ✓ |
 | Merge as human-confirmed record | ✗ (auto summary) | ✓ squash/discard/tournament | ✗ | ✗ (auto summary) | ✓ same modes |
 | Crop results / drop turns | ✗ | ✓ (reconstruction block) | auto prune only | ✗ | ✓ true per-message view |
 | Undo of mutations | leaf move | ✓ | revert (deletes) | ✗ | ✓ |
@@ -605,7 +609,7 @@ packages/
 
 | Milestone | Deliverable | Verifies |
 |---|---|---|
-| **M0 spike** (1–2 days) | throw-away plugin with both halves: `/tree` route that lists messages, one crop via the hook, one fork with metadata mirror, `$EDITOR` gate | tui.json loading; in-place hook mutation; `metadata` round-trip; `renderer.suspend`; `chat.message` model override; DialogSelect bug workaround |
+| **M0 spike** — done, see `docs/M0.md` | harness + spike plugins for both halves; all five behaviours verified, plus a bundled JSX route | tui.json-only loading; in-place hook mutation; `metadata` round-trip; `renderer.suspend`; `chat.message` model override |
 | **M1 tree** | route with gutter, fold/expand, jump (fork/switch), `/branch`, labels, filters, search, `api.kv` memory | Pi parity for navigation |
 | **M2 cost** | tokens per row, minimap lanes, gauge slot, consumers view, sidebar card | DSH lanes + `pi-context-tree` gauge |
 | **M3 crop** | crop mode (result/turn), `--top`, `--auto`, protections, `/undo` for crops, headless `/ctree crop` | transform invariants, compaction interplay |

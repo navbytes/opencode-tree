@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "mock": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Mock",
+      "options": { "baseURL": "http://127.0.0.1:4010/v1", "apiKey": "x" },
+      "models": {
+        "mock-a": { "name": "mock-a", "limit": { "context": 200000, "output": 8192 }, "tool_call": true },
+        "mock-b": { "name": "mock-b", "limit": { "context": 200000, "output": 8192 }, "tool_call": true }
+      }
+    }
+  },
+  "model": "mock/mock-a",
+  "permission": { "bash": "allow", "edit": "allow" },
+  "share": "disabled"
+}
