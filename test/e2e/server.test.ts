@@ -14,14 +14,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { cp, mkdir } from "node:fs/promises"
 import path from "node:path"
-import {
-  createProject,
-  startMock,
-  startServer,
-  TEMPLATE_PROJECT_DIR,
-  type StartedMock,
-  type StartedServer,
-} from "./harness.js"
+import { readFileSync, readdirSync } from "node:fs"
+import { createProject, startMock, startServer, TEMPLATE_PROJECT_DIR, type StartedMock, type StartedServer, REPO_ROOT, installPlugins } from "./harness.js"
 
 const e2e = process.env.CTREE_E2E === "1"
 
@@ -218,4 +212,65 @@ describe.skipIf(!e2e)("server e2e: experimental.chat.messages.transform", () => 
     const content = String(toolMessages[0].content)
     expect(content.startsWith("[cropped: bash")).toBe(true)
   }, 30_000)
+})
+
+
+describe.skipIf(!e2e)("server e2e: built plugin headless /ctree commands", () => {
+  let mock: StartedMock
+  let server: StartedServer
+  let cleanupProject: () => Promise<void>
+  let dir: string
+
+  beforeAll(async () => {
+    const build = Bun.spawnSync({ cmd: ["bun", "run", "scripts/build.ts"], cwd: REPO_ROOT, stdio: ["ignore", "pipe", "pipe"] })
+    if (build.exitCode !== 0) throw new Error(`build failed: ${build.stderr.toString()}`)
+    mock = await startMock({ tool: true })
+    const project = await createProject({ mockPort: mock.port })
+    cleanupProject = project.cleanup
+    dir = project.dir
+    await installPlugins({ projectDir: project.dir, server: [path.join(REPO_ROOT, "dist", "server.js")] })
+    server = await startServer({ projectDir: project.dir })
+  }, 120_000)
+
+  afterAll(async () => {
+    await server?.stop()
+    await mock?.stop()
+    await cleanupProject?.()
+  })
+
+  test("/ctree status, crop --top --apply, undo drive the journal and the provider sees the stub", async () => {
+    const session = unwrap(await server.client.session.create({ query: { directory: server.dir }, body: { title: "headless" } }))
+    // two tool turns (MOCK_TOOL=1 answers "…tool…" prompts with a bash call) so the older
+    // result is unprotected; then a plain turn
+    unwrap(await server.client.session.prompt({ path: { id: session.id }, query: { directory: server.dir }, body: { parts: [{ type: "text", text: "run the tool" }] } }))
+    unwrap(await server.client.session.prompt({ path: { id: session.id }, query: { directory: server.dir }, body: { parts: [{ type: "text", text: "run the tool again" }] } }))
+    unwrap(await server.client.session.prompt({ path: { id: session.id }, query: { directory: server.dir }, body: { parts: [{ type: "text", text: "second" }] } }))
+    mock.clearRequests()
+
+    const status = unwrap(await server.client.session.command({ path: { id: session.id }, query: { directory: server.dir }, body: { command: "ctree", arguments: "status" } }))
+    expect(status.info.role).toBe("assistant")
+    let last = mock.requests().at(-1)!.body.messages as { role: string; content: unknown }[]
+    expect(String(last.filter((m) => m.role === "user").at(-1)!.content)).toContain("[context tree]")
+    expect(String(last.filter((m) => m.role === "user").at(-1)!.content)).toContain("not in a tree yet")
+
+    unwrap(await server.client.session.command({ path: { id: session.id }, query: { directory: server.dir }, body: { command: "ctree", arguments: "crop --top --apply" } }))
+    const journalDir = path.join(dir, ".opencode", "context-tree")
+    const file = readdirSync(journalDir).find((f) => f.endsWith(".jsonl"))!
+    expect(readFileSync(path.join(journalDir, file), "utf8")).toContain('"type":"crop.applied"')
+
+    mock.clearRequests()
+    unwrap(await server.client.session.prompt({ path: { id: session.id }, query: { directory: server.dir }, body: { parts: [{ type: "text", text: "after crop" }] } }))
+    last = mock.requests().at(-1)!.body.messages as { role: string; content: unknown }[]
+    const toolMsgs = last.filter((m) => m.role === "tool").map((m) => String(m.content))
+    expect(toolMsgs.length).toBe(2)
+    expect(toolMsgs[0]!.startsWith("[cropped: bash")).toBe(true) // the older result
+    expect(toolMsgs[1]!.startsWith("mock-tool-output")).toBe(true) // latest per tool stays
+
+    unwrap(await server.client.session.command({ path: { id: session.id }, query: { directory: server.dir }, body: { command: "ctree", arguments: "undo" } }))
+    expect(readFileSync(path.join(journalDir, file), "utf8")).toContain('"type":"crop.restored"')
+    mock.clearRequests()
+    unwrap(await server.client.session.prompt({ path: { id: session.id }, query: { directory: server.dir }, body: { parts: [{ type: "text", text: "after undo" }] } }))
+    last = mock.requests().at(-1)!.body.messages as { role: string; content: unknown }[]
+    expect(last.filter((m) => m.role === "tool").every((m) => !String(m.content).startsWith("[cropped"))).toBe(true)
+  }, 180_000)
 })

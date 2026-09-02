@@ -32,8 +32,13 @@ const server = http.createServer((req, res) => {
       fs.appendFileSync(LOG, JSON.stringify({ ts: Date.now(), url, model: json.model, stream: !!json.stream, body: json }) + "\n");
       const id = "chatcmpl-" + Date.now();
       const created = Math.floor(Date.now() / 1000);
-      const hasToolResult = (json.messages || []).some((m) => m.role === "tool");
-      const wantTool = process.env.MOCK_TOOL === "1" && !hasToolResult && (json.tools || []).some((t) => t.function?.name === "bash");
+      // MOCK_TOOL=1: answer with a bash tool call whenever the latest message is a user
+      // message mentioning "tool" (so tests control tool turns per prompt); a request that
+      // ends with a tool result gets plain text.
+      const msgs = json.messages || [];
+      const lastMsg = msgs[msgs.length - 1] || {};
+      const lastText = typeof lastMsg.content === "string" ? lastMsg.content : Array.isArray(lastMsg.content) ? lastMsg.content.map((c) => c.text || "").join(" ") : "";
+      const wantTool = process.env.MOCK_TOOL === "1" && lastMsg.role === "user" && /^run the tool/i.test(lastText.trim()) && (json.tools || []).some((t) => t.function?.name === "bash");
       if (json.stream) {
         const chunks = [];
         if (wantTool) {

@@ -5,11 +5,11 @@ Pi-style context tree for [OpenCode](https://opencode.ai), with the
 (`/branch`, `/merge`, `/crop`, `/undo`) and a DeepSeek-Harness-style trajectory view
 (timeline lanes, per-step tokens and timing, inspector) in one screen.
 
-**Status: working prototype (M0–M4 done, see `docs/M0.md` and the roadmap in DESIGN.md §11).**
-Branch, jump, labels, filters, search, crop + undo, and squash/discard/tournament merge
-with a `$EDITOR` gate all work against OpenCode 1.18 and are covered by pty-driven e2e
-tests (`bun run test:e2e`). Not yet: the timeline minimap, the inspector pane,
-the consumers view, an npm release. Read [DESIGN.md](./DESIGN.md) — it contains the research
+**Status: working prototype, not yet on npm (see `docs/USAGE.md` and DESIGN.md §11).**
+Branch, jump, labels, filters, search, crop + undo, squash/discard/tournament merge with a
+`$EDITOR` gate, the timeline lanes, inspector and consumers views, the gauge, and the headless
+`/ctree` commands all work against OpenCode 1.18 and are covered by pty-driven e2e tests
+(`bun run test:e2e`). Read [DESIGN.md](./DESIGN.md) — it contains the research
 (Pi, `pi-context-tree`, OpenCode plugin/SDK surface, existing plugins, DSH
 trajectory), the end-user flows, the combined tree + trajectory mockup, the data
 model, architecture, edge cases, and the roadmap.

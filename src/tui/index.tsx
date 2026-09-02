@@ -259,13 +259,57 @@ const tui: TuiPlugin = async (api, rawOptions) => {
         )
       },
       session_prompt_right: (_ctx, props: { session_id: string }) => {
-        const size = createMemo(() => contextSizeOf(toMinimalMessages(api.state.session.messages(props.session_id), api.state.part)))
         const t = api.theme.current
+        const size = createMemo(() => contextSizeOf(toMinimalMessages(api.state.session.messages(props.session_id), api.state.part)))
         const band = () => bandFor(size().tokens)
         const branch = () => store.stateForSession(props.session_id)?.sessions[props.session_id]
+        // model context limit + compaction reserve, for the guard (DESIGN.md §6.7)
+        const limit = createMemo(() => {
+          const last = [...(api.state.session.messages(props.session_id) as unknown as { role: string; providerID?: string; modelID?: string }[])].reverse().find((m) => m.role === "assistant")
+          if (!last?.providerID || !last.modelID) return undefined
+          const provider = api.state.provider.find((p) => p.id === last.providerID)
+          const model = provider?.models[last.modelID] as { limit?: { context?: number; output?: number } } | undefined
+          return model?.limit?.context
+        })
+        const reserve = () => (api.state.config as { compaction?: { reserved?: number } }).compaction?.reserved ?? 16_384
+        // trend + attribution: compare with the previous render of this slot
+        let prevTokens = 0
+        let prevParts = new Map<string, number>()
+        let redNudged = false
+        let guardNudged = false
+        const trend = createMemo(() => {
+          const now = size().tokens
+          const parts = new Map<string, number>()
+          let biggest: { key: string; delta: number } | undefined
+          for (const m of api.state.session.messages(props.session_id)) {
+            for (const p of api.state.part(m.id) as unknown as { id: string; type: string; tool?: string; text?: string; state?: { output?: string } }[]) {
+              const len = p.type === "tool" ? (p.state?.output?.length ?? 0) : (p.text?.length ?? 0)
+              parts.set(p.id, len)
+              const delta = len - (prevParts.get(p.id) ?? 0)
+              if (delta > 0 && (!biggest || delta > biggest.delta)) biggest = { key: p.type === "tool" ? (p.tool ?? "tool") : p.type === "text" ? "text" : p.type, delta }
+            }
+          }
+          const rise = prevTokens > 0 ? (now - prevTokens) / prevTokens : 0
+          const out = rise >= 0.1 && biggest ? ` ▲ +${Math.round(rise * 100)}% (${biggest.key})` : ""
+          prevTokens = now
+          prevParts = parts
+          return out
+        })
+        createMemo(() => {
+          const b = band()
+          if (b === "red" && !redNudged) {
+            redNudged = true
+            api.ui.toast({ variant: "warning", message: "context is in the red band (≥64k) — consider /tree → c crop, or /merge a branch", duration: 6000 })
+          } else if (b === "low" || b === "healthy") redNudged = false
+          const lim = limit()
+          if (lim && size().tokens >= lim - reserve() && !guardNudged) {
+            guardNudged = true
+            api.ui.toast({ variant: "error", message: "OpenCode will auto-compact soon (lossy). Crop or merge first if you want to keep the source material.", duration: 8000 })
+          } else if (lim && size().tokens < lim - reserve() * 2) guardNudged = false
+        })
         return (
           <text fg={t[BAND_COLOR[band()]]}>
-            {branch() ? `⎇ ${branch()!.name ?? "branch"} · ` : ""}ctx {formatK(size().tokens)}
+            {branch() ? `⎇ ${branch()!.name ?? "branch"} · ` : ""}ctx {formatK(size().tokens)}{limit() ? `/${formatK(limit()!)}` : ""} · {band()}{trend()}
           </text>
         )
       },

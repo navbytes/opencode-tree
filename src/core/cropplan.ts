@@ -154,10 +154,12 @@ export function autoMark(candidates: ResultCandidate[], rules: CropRules = DEFAU
   return candidates.filter((c) => c.estTokens >= rules.minTokens && c.turnsAgo >= rules.olderThanTurns && c.protections.length === 0)
 }
 
-/** The single biggest unprotected result (`/crop --top`). */
-export function topCandidate(candidates: ResultCandidate[]): ResultCandidate | undefined {
+/** The single biggest unprotected result (`/crop --top`). With `force`, the "latest per
+ *  tool" protection is waived (the current turn and decision records never are). */
+export function topCandidate(candidates: ResultCandidate[], force = false): ResultCandidate | undefined {
+  const waived: Protection[] = force ? ["too-small", "latest-per-tool"] : ["too-small"]
   return candidates
-    .filter((c) => !c.protections.some((p) => p !== "too-small"))
+    .filter((c) => !c.protections.some((p) => !waived.includes(p)))
     .sort((a, b) => b.estTokens - a.estTokens)[0]
 }
 

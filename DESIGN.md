@@ -610,12 +610,12 @@ packages/
 | Milestone | Deliverable | Verifies |
 |---|---|---|
 | **M0 spike** — done, see `docs/M0.md` | harness + spike plugins for both halves; all five behaviours verified, plus a bundled JSX route | tui.json-only loading; in-place hook mutation; `metadata` round-trip; `renderer.suspend`; `chat.message` model override |
-| **M1 tree** | route with gutter, fold/expand, jump (fork/switch), `/branch`, labels, filters, search, `api.kv` memory | Pi parity for navigation |
-| **M2 cost** | tokens per row, minimap lanes, gauge slot, consumers view, sidebar card | DSH lanes + `pi-context-tree` gauge |
-| **M3 crop** | crop mode (result/turn), `--top`, `--auto`, protections, `/undo` for crops, headless `/ctree crop` | transform invariants, compaction interplay |
-| **M4 merge** | draft → editor gate → ◆ record; discard; tournament; decisions view + export; `/undo` for merges; compaction re-injection | end-to-end goldens |
-| **M5 trajectory** | inspector facets, Duration/Calls modes, idle separators, nested subagent rows, narrow-terminal layouts | DSH parity |
-| **M6 polish** | docs, `opencode plugin` install path, v2 adapter, hard-crop option, `--purge` | release |
+| **M1 tree** — done | route with gutter, fold/expand, jump (fork/switch), `/branch`, labels, filters, search, `api.kv` memory | pty e2e: branch, switch both ways |
+| **M2 cost** — done | tokens per row, minimap lanes, gauge slot with trend/attribution and compaction guard, consumers view, sidebar card | screen snapshots |
+| **M3 crop** — done | crop mode (result/turn), `--top`, `--auto`, protections, `/undo` for crops, headless `/ctree crop` | e2e: stub reaches the provider, undo restores |
+| **M4 merge** — done | draft → editor gate → ◆ record; discard; tournament; decisions view + export; `/undo` for merges; compaction re-injection | e2e: record reaches the provider, undo re-opens |
+| **M5 trajectory** — done (partly) | inspector facets, Duration/Turns/Calls modes; idle separators and nested subagent rows not yet | screen snapshots |
+| **M6 polish** — in progress | docs/USAGE.md, headless `/ctree`, LICENSE, package metadata done; keybind options, v2 adapter, hard-crop option, `--purge`, npm release pending | |
 
 ---
 

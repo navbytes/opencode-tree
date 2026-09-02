@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": false,
   "type": "module",
-  "description": "Pi-style context tree for OpenCode: /branch, /merge, /crop, /undo, with a combined tree + trajectory view.",
+  "description": "Pi-style context tree for OpenCode: branch, merge (human-confirmed decision records), crop, undo, plus a DeepSeek-Harness-style trajectory view",
   "license": "MIT",
   "exports": {
     ".": {
@@ -21,7 +21,9 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "docs/USAGE.md"
   ],
   "scripts": {
     "build": "bun run scripts/build.ts",
@@ -64,5 +66,25 @@
     "solid-js": {
       "optional": true
     }
+  },
+  "author": "Naveen (navbytes)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/navbytes/opencode-tree.git"
+  },
+  "homepage": "https://github.com/navbytes/opencode-tree#readme",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "context-tree",
+    "context-engineering",
+    "branch",
+    "merge",
+    "crop",
+    "trajectory",
+    "tui"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }
