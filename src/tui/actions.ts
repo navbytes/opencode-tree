@@ -5,6 +5,8 @@
  */
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { JournalStore } from "../shared/store.js"
+import type { CropAppliedData } from "../core/journal.js"
+import type { UndoPlan } from "../core/undo.js"
 import { debug } from "../shared/debug.js"
 
 export type JumpPlan =
@@ -226,4 +228,48 @@ export async function summarizeInto(
 export function setLabel(ctx: ActionContext, input: { sessionID: string; messageID: string; label: string | null }): void {
   const treeId = ctx.store.ensureTree(input.sessionID, "tui")
   ctx.store.record(treeId, "label.set", { sessionID: input.sessionID, messageID: input.messageID, label: input.label }, "tui")
+}
+
+/** Record a crop (the server half applies it on the next turn). */
+export function applyCrop(ctx: ActionContext, data: CropAppliedData): string {
+  const treeId = ctx.store.ensureTree(data.sessionID, "tui")
+  const entry = ctx.store.record(treeId, "crop.applied", data, "tui")
+  return entry.id
+}
+
+/** Execute an undo plan (DESIGN.md §6.6). Returns the session to show afterwards. */
+export async function executeUndo(ctx: ActionContext, sessionID: string, plan: UndoPlan): Promise<string | undefined> {
+  const treeId = ctx.store.ensureTree(sessionID, "tui")
+  debug("undo.plan", { plan })
+  switch (plan.kind) {
+    case "nothing":
+      ctx.api.ui.toast({ message: "nothing to undo on this path" })
+      return undefined
+    case "restore-crop":
+      ctx.store.record(treeId, "crop.restored", { cropID: plan.cropID }, "tui")
+      ctx.api.ui.toast({ variant: "success", message: `↶ restored ${plan.mode === "turn" ? "dropped turn" : "cropped result"} (~${Math.round(plan.estTokens / 100) / 10}k tokens back in context)` })
+      return undefined
+    case "abandon-branch": {
+      await abortIfBusy(ctx, sessionID)
+      ctx.store.record(treeId, "branch.closed", { sessionID: plan.sessionID, status: "abandoned" }, "tui")
+      await mirrorMetadata(ctx, plan.sessionID, { status: "abandoned" })
+      navigateToSession(ctx, plan.parentSessionID)
+      ctx.api.ui.toast({ variant: "success", message: `↶ back on the trunk; ⎇ ${plan.name ?? "branch"} kept as abandoned` })
+      return plan.parentSessionID
+    }
+    case "reopen-branch": {
+      const branch = ctx.store.stateFor(treeId).sessions[plan.sessionID]
+      if (!branch) return undefined
+      ctx.store.record(
+        treeId,
+        "branch.opened",
+        { sessionID: branch.sessionID, parentSessionID: branch.parentSessionID, anchorMessageID: branch.anchorMessageID, name: branch.name, kind: branch.kind, branchModel: branch.branchModel, trunkModel: branch.trunkModel },
+        "tui",
+      )
+      await mirrorMetadata(ctx, plan.sessionID, { status: "open" })
+      navigateToSession(ctx, plan.sessionID)
+      ctx.api.ui.toast({ variant: "success", message: `↶ re-opened ⎇ ${branch.name ?? "branch"}${plan.decisionMessageID ? " (its decision record is hidden from the model)" : ""}` })
+      return plan.sessionID
+    }
+  }
 }

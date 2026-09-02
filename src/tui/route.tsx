@@ -12,7 +12,9 @@ import { bandFor } from "../core/tokens.js"
 import { buildTreeView, type Filter, type Row } from "../core/tree.js"
 import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
-import { createNamedBranch, executeJump, setLabel, type ActionContext, type SummaryChoice } from "./actions.js"
+import { applyCrop, createNamedBranch, executeJump, executeUndo, setLabel, type ActionContext, type SummaryChoice } from "./actions.js"
+import { autoMark, planResultCrop, planTurnCrops, reclaimed, resultCandidates, turnCandidates, type ResultCandidate, type TurnCandidate } from "../core/cropplan.js"
+import { planUndo } from "../core/undo.js"
 import { fetchTranscript, liveTranscript } from "./transcripts.js"
 import { debug } from "../shared/debug.js"
 
@@ -89,6 +91,8 @@ export function TreeRoute(props: TreeRouteProps) {
   const [selected, setSelected] = createSignal(0)
   const [others, setOthers] = createSignal<Record<string, Transcript>>({})
   const [busy, setBusy] = createSignal<string | undefined>()
+  const [cropMode, setCropMode] = createSignal<"result" | "turn" | undefined>()
+  const [marked, setMarked] = createSignal<Set<string>>(new Set())
 
   const state = createMemo<TreeState>(() => {
     tick()
@@ -156,6 +160,139 @@ export function TreeRoute(props: TreeRouteProps) {
     return start
   })
   const visible = createMemo(() => view().rows.slice(windowStart(), windowStart() + height()))
+
+  // ---- crop mode -----------------------------------------------------------
+  // Crops act on the *current* session's context. Spine rows above the fork point carry
+  // the ancestor's message IDs, but the current session holds a positional copy of that
+  // prefix, so the k-th distinct depth-0 message maps onto current.messages[k].
+  const live = () => (sessionID ? liveTranscript(api, sessionID) : undefined)
+  const rowToCurrent = createMemo(() => {
+    const map = new Map<string, { messageID: string; partIndex: Record<string, number> }>()
+    const lv = live()
+    if (!lv) return map
+    let k = -1
+    let lastKey = ""
+    for (const r of view().rows) {
+      if (r.kind === "branch" || r.depth > 0) continue
+      const key = `${r.sessionID}:${r.messageID}`
+      if (key !== lastKey) {
+        k++
+        lastKey = key
+      }
+      const cur = lv.messages[k]
+      if (!cur) continue
+      const partIndex: Record<string, number> = {}
+      cur.parts.forEach((p, i) => (partIndex[p.id] = i))
+      map.set(key, { messageID: cur.id, partIndex })
+    }
+    return map
+  })
+  const currentMessageOf = (row: Row): string | undefined => {
+    if (row.kind === "branch") return undefined
+    if (row.sessionID === sessionID) return row.messageID
+    return rowToCurrent().get(`${row.sessionID}:${row.messageID}`)?.messageID
+  }
+  const currentPartOf = (row: Row & { kind: "step" }): string | undefined => {
+    if (row.sessionID === sessionID) return row.partID
+    // same position within the copied message
+    const other = others()[row.sessionID]?.messages.find((m) => m.id === row.messageID)
+    const idx = other?.parts.findIndex((p) => p.id === row.partID) ?? -1
+    const cur = live()?.messages.find((m) => m.id === currentMessageOf(row))
+    return idx >= 0 ? cur?.parts[idx]?.id : undefined
+  }
+  const alreadyCropped = createMemo(() => {
+    const set = new Set<string>()
+    if (!sessionID) return set
+    for (const c of state().activeCrops(sessionID)) for (const t of c.targets) set.add(t.partID ?? t.messageID)
+    return set
+  })
+  const resultCands = createMemo(() => (live() ? resultCandidates(live()!, { alreadyCropped: alreadyCropped() }) : []))
+  const turnCands = createMemo(() => (live() ? turnCandidates(live()!, { alreadyDropped: alreadyCropped() }) : []))
+  const candidateOf = (row: Row): ResultCandidate | TurnCandidate | undefined => {
+    const mode = cropMode()
+    if (!mode) return undefined
+    if (mode === "result") {
+      if (row.kind !== "step" || row.glyph !== "⚙") return undefined
+      const pid = currentPartOf(row)
+      return resultCands().find((c) => c.partID === pid)
+    }
+    const mid = currentMessageOf(row)
+    return turnCands().find((c) => c.anchorMessageID === mid)
+  }
+  const markKey = (c: ResultCandidate | TurnCandidate) => (c.kind === "result" ? c.partID : c.anchorMessageID)
+  const selectedCandidates = createMemo(() => {
+    const m = marked()
+    const list: (ResultCandidate | TurnCandidate)[] = cropMode() === "result" ? resultCands() : turnCands()
+    return list.filter((c) => m.has(markKey(c)))
+  })
+
+  function toggleMark() {
+    const row = current()
+    if (!row) return
+    const c = candidateOf(row)
+    debug("crop.mark", { row: row.id, candidate: c ? { kind: c.kind, protections: c.protections } : undefined, marked: [...marked()] })
+    if (!c) {
+      api.ui.toast({ message: cropMode() === "result" ? "select a tool result row" : "select a turn row" })
+      return
+    }
+    const hard = c.protections.filter((p) => p !== "too-small")
+    const next = new Set(marked())
+    const key = markKey(c)
+    if (next.has(key)) next.delete(key)
+    else if (hard.length && !(next.has(`${key}:warned`))) {
+      next.add(`${key}:warned`)
+      api.ui.toast({ variant: "warning", message: `protected (${hard.join(", ")}) — press space again to mark anyway` })
+    } else next.add(key)
+    setMarked(next)
+  }
+
+  function autoMarkAll() {
+    if (cropMode() !== "result") return
+    const picks = autoMark(resultCands())
+    setMarked(new Set(picks.map((c) => c.partID)))
+    api.ui.toast({ message: picks.length ? `auto-marked ${picks.length} result${picks.length === 1 ? "" : "s"} (≥10k tokens, older than 2 turns)` : "nothing matches the auto rules" })
+  }
+
+  async function applyMarked() {
+    if (!sessionID) return
+    const picks = selectedCandidates()
+    debug("crop.apply", { picks: picks.length, marked: [...marked()] })
+    if (picks.length === 0) {
+      api.ui.toast({ message: "nothing marked — space marks a row, a auto-marks" })
+      return
+    }
+    const total = reclaimed(picks)
+    const ok = await confirm(`Crop ${picks.length} ${cropMode() === "result" ? "result" : "turn"}${picks.length === 1 ? "" : "s"}?`, `~${formatK(total)} tokens leave the model's context on the next turn. The transcript keeps the originals; /undo restores.`)
+    if (!ok) return
+    await guarded("crop", async () => {
+      if (cropMode() === "result") {
+        const plan = planResultCrop(sessionID, picks as ResultCandidate[])
+        if (plan) applyCrop(ctx, plan)
+      } else {
+        for (const plan of planTurnCrops(sessionID, picks as TurnCandidate[])) applyCrop(ctx, plan)
+      }
+      api.ui.toast({ variant: "success", message: `✂ cropped ${picks.length} · ~${formatK(total)} reclaimed` })
+      setMarked(new Set<string>())
+      setCropMode(undefined)
+    })
+  }
+
+  async function undo() {
+    if (!sessionID) return
+    const st = state()
+    const plan = planUndo(store.entriesFor(st.treeId), st, sessionID)
+    if (plan.kind === "nothing") {
+      api.ui.toast({ message: "nothing to undo on this path" })
+      return
+    }
+    const what =
+      plan.kind === "restore-crop" ? `restore the ${plan.mode === "turn" ? "dropped turn" : "cropped result"} (~${formatK(plan.estTokens)} tokens)` : plan.kind === "abandon-branch" ? `leave ⎇ ${plan.name ?? "this branch"} and return to its parent` : `re-open the ${plan.status} branch`
+    const ok = await confirm("Undo?", `This will ${what}. Nothing is deleted.`)
+    if (!ok) return
+    await guarded("undo", async () => {
+      await executeUndo(ctx, sessionID, plan)
+    })
+  }
 
   const band = () => bandFor(view().totalTokens)
   const branchOfCurrent = () => (sessionID ? state().sessions[sessionID] : undefined)
@@ -365,7 +502,7 @@ export function TreeRoute(props: TreeRouteProps) {
       { name: "ctree.fold", hidden: true, run: () => foldOrUnfold(false) },
       { name: "ctree.unfold", hidden: true, run: () => foldOrUnfold(true) },
       { name: "ctree.toggle", hidden: true, run: () => foldOrUnfold(!(current()?.kind === "branch" && (current() as Row & { kind: "branch" }).expanded)) },
-      { name: "ctree.go", hidden: true, run: () => void jump() },
+      { name: "ctree.go", hidden: true, run: () => void (cropMode() ? applyMarked() : jump()) },
       { name: "ctree.branch", hidden: true, run: () => void branch() },
       { name: "ctree.label", hidden: true, run: () => void label() },
       {
@@ -385,7 +522,40 @@ export function TreeRoute(props: TreeRouteProps) {
             if (v !== undefined) setSearch(v.trim())
           }),
       },
-      { name: "ctree.back", hidden: true, run: () => back() },
+      {
+        name: "ctree.crop",
+        hidden: true,
+        run: () => {
+          if (cropMode()) {
+            setCropMode(undefined)
+            setMarked(new Set<string>())
+          } else setCropMode("result")
+        },
+      },
+      {
+        name: "ctree.crop_toggle_mode",
+        hidden: true,
+        run: () => {
+          if (!cropMode()) return
+          setCropMode(cropMode() === "result" ? "turn" : "result")
+          setMarked(new Set<string>())
+        },
+      },
+      { name: "ctree.mark", hidden: true, enabled: () => Boolean(cropMode()), run: () => toggleMark() },
+      { name: "ctree.auto", hidden: true, enabled: () => Boolean(cropMode()), run: () => autoMarkAll() },
+      { name: "ctree.undo", hidden: true, run: () => void undo() },
+      {
+        name: "ctree.back",
+        hidden: true,
+        run: () => {
+          if (cropMode()) {
+            setCropMode(undefined)
+            setMarked(new Set<string>())
+            return
+          }
+          back()
+        },
+      },
     ],
     bindings: [
       { key: "up", cmd: "ctree.up" },
@@ -407,6 +577,11 @@ export function TreeRoute(props: TreeRouteProps) {
       { key: "e", cmd: "ctree.toggle" },
       { key: "return", cmd: "ctree.go" },
       { key: "b", cmd: "ctree.branch" },
+      { key: "c", cmd: "ctree.crop" },
+      { key: "t", cmd: "ctree.crop_toggle_mode" },
+      { key: "space", cmd: "ctree.mark" },
+      { key: "a", cmd: "ctree.auto" },
+      { key: "x", cmd: "ctree.undo" },
       { key: "shift+l", cmd: "ctree.label" },
       { key: "f", cmd: "ctree.filter" },
       { key: "/", cmd: "ctree.search" },
@@ -428,8 +603,8 @@ export function TreeRoute(props: TreeRouteProps) {
       <text fg={t.primary}>
         ┌ Context tree · {title()}   {headerRight()}
       </text>
-      <text fg={t.textMuted}>
-        │ filter: {filter()}
+      <text fg={cropMode() ? t.warning : t.textMuted}>
+        │ {cropMode() ? `✂ crop mode (${cropMode()}) · space mark · a auto · t result⇄turn · ⏎ apply · esc leave · marked ${selectedCandidates().length} ~${formatK(reclaimed(selectedCandidates()))}` : `filter: ${filter()}`}
         {search() ? `   search: "${search()}"` : ""}
         {busy() ? `   … ${busy()}` : ""}   {view().rows.length} rows
       </text>
@@ -441,15 +616,24 @@ export function TreeRoute(props: TreeRouteProps) {
           const isSel = () => windowStart() + i() === selected()
           const color = () =>
             row.kind === "branch" ? statusColor(t, row) : row.kind === "turn" ? (row.isDecision ? t.accent : t.text) : row.isError ? t.error : row.warn ? t.warning : t.textMuted
+          const mark = () => {
+            if (!cropMode()) return ""
+            const c = candidateOf(row)
+            if (!c) return "    "
+            const on = marked().has(markKey(c))
+            const prot = c.protections.filter((p) => p !== "too-small")
+            return `${on ? "[x]" : "[ ]"}${prot.length ? "!" : " "}`
+          }
           return (
             <text fg={isSel() ? t.selectedListItemText : (color() as never)} bg={isSel() ? t.backgroundElement : undefined}>
-              {isSel() ? "›" : "│"} {rowLine(row, width())}
+              {isSel() ? "›" : "│"} {mark()}
+              {rowLine(row, width() - (cropMode() ? 4 : 0))}
             </text>
           )
         }}
       </For>
       <text fg={t.textMuted}>
-        └ ⏎ go here  b branch  L label  ←→ fold/unfold  [ ] branches  f filter  / search  g/G top/bottom  q back
+        └ ⏎ go here  b branch  c crop  x undo  L label  ←→ fold  [ ] branches  f filter  / search  g/G  q back
       </text>
     </box>
   )

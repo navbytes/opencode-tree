@@ -99,6 +99,11 @@ export class JournalStore {
     return entries
   }
 
+  /** Raw journal entries of a tree in file order (for undo planning). */
+  entriesFor(treeId: string): JournalEntry[] {
+    return this.readEntries(treeId)
+  }
+
   /** Folded tree state for a tree, from cache when the journal file hasn't changed. */
   stateFor(treeId: string): TreeState {
     this.readEntries(treeId) // populates/refreshes the cache as a side effect

@@ -151,6 +151,22 @@ const tui: TuiPlugin = async (api, rawOptions) => {
 
   api.slots.register({
     slots: {
+      sidebar_content: (_ctx, props: { session_id: string }) => {
+        const t = api.theme.current
+        const st = () => store.stateForSession(props.session_id)
+        const branch = () => st()?.sessions[props.session_id]
+        const crops = () => st()?.activeCrops(props.session_id) ?? []
+        const hidden = () => crops().reduce((s, c) => s + c.targets.reduce((x, y) => x + y.estTokens, 0), 0)
+        const siblings = () => Object.values(st()?.sessions ?? {}).filter((b) => b.parentSessionID === props.session_id && b.status === "open").length
+        return (
+          <box flexDirection="column">
+            <text fg={t.textMuted}>Context tree</text>
+            <text fg={branch() ? t.success : t.text}>{branch() ? `⎇ ${branch()!.name ?? "branch"} · ${branch()!.status}` : `trunk${siblings() ? ` · ${siblings()} open branch${siblings() === 1 ? "" : "es"}` : ""}`}</text>
+            <text fg={crops().length ? t.warning : t.textMuted}>{crops().length ? `✂ ${crops().length} crop${crops().length === 1 ? "" : "s"} · ~${formatK(hidden())} hidden from model` : "no crops"}</text>
+            <text fg={t.textMuted}>/tree · ctrl+q</text>
+          </box>
+        )
+      },
       session_prompt_right: (_ctx, props: { session_id: string }) => {
         const size = createMemo(() => contextSizeOf(toMinimalMessages(api.state.session.messages(props.session_id), api.state.part)))
         const t = api.theme.current
