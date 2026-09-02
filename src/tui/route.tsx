@@ -29,7 +29,7 @@ export type TreeRouteProps = {
   store: JournalStore
   directory: string
   sessionID?: string
-  options: { jumpSummary: "ask" | "never" }
+  options: { jumpSummary: "ask" | "never"; hardCrop?: boolean; keybinds?: Record<string, string[]> }
   /** open directly on a secondary view */
   initialView?: "tree" | "decisions"
 }
@@ -83,6 +83,47 @@ function rowLine(row: Row, width: number): string {
   const room = Math.max(10, width - tokens.length - 2)
   const clipped = body.length > room ? `${body.slice(0, room - 1)}…` : body.padEnd(room)
   return `${clipped} ${tokens}`
+}
+
+const DEFAULT_KEYS: Record<string, string[]> = {
+  up: ["up", "k"],
+  down: ["down", "j"],
+  jump_up: ["shift+up", "shift+k"],
+  jump_down: ["shift+down", "shift+j"],
+  first: ["g"],
+  last: ["shift+g"],
+  prev_branch: ["["],
+  next_branch: ["]"],
+  fold: ["left", "h"],
+  unfold: ["right", "l"],
+  toggle: ["e"],
+  go: ["return"],
+  branch: ["b"],
+  crop: ["c"],
+  crop_toggle_mode: ["t"],
+  mark: ["space"],
+  auto: ["a"],
+  undo: ["x"],
+  merge: ["m"],
+  inspector: ["i"],
+  consumers: ["u"],
+  copy: ["y"],
+  mode_duration: ["1"],
+  mode_turns: ["2"],
+  mode_calls: ["3"],
+  decisions: ["shift+d"],
+  export: ["shift+e"],
+  label: ["shift+l"],
+  filter: ["f"],
+  search: ["/"],
+  back: ["q", "escape"],
+}
+
+/** Plugin option `keybinds: { <command>: "k,up" | [..] | "none" }` overrides DEFAULT_KEYS. */
+function bindingsFor(overrides: Record<string, string[]> | undefined) {
+  const out: { key: string; cmd: string }[] = []
+  for (const [cmd, keys] of Object.entries(DEFAULT_KEYS)) for (const key of overrides?.[cmd] ?? keys) out.push({ key, cmd: `ctree.${cmd}` })
+  return out
 }
 
 export function TreeRoute(props: TreeRouteProps) {
@@ -280,9 +321,9 @@ export function TreeRoute(props: TreeRouteProps) {
     await guarded("crop", async () => {
       if (cropMode() === "result") {
         const plan = planResultCrop(sessionID, picks as ResultCandidate[])
-        if (plan) applyCrop(ctx, plan)
+        if (plan) await applyCrop(ctx, plan, { hard: Boolean(props.options.hardCrop) })
       } else {
-        for (const plan of planTurnCrops(sessionID, picks as TurnCandidate[])) applyCrop(ctx, plan)
+        for (const plan of planTurnCrops(sessionID, picks as TurnCandidate[])) await applyCrop(ctx, plan, { hard: false })
       }
       api.ui.toast({ variant: "success", message: `✂ cropped ${picks.length} · ~${formatK(total)} reclaimed` })
       setMarked(new Set<string>())
@@ -760,46 +801,7 @@ export function TreeRoute(props: TreeRouteProps) {
         },
       },
     ],
-    bindings: [
-      { key: "up", cmd: "ctree.up" },
-      { key: "k", cmd: "ctree.up" },
-      { key: "down", cmd: "ctree.down" },
-      { key: "j", cmd: "ctree.down" },
-      { key: "shift+up", cmd: "ctree.jump_up" },
-      { key: "shift+k", cmd: "ctree.jump_up" },
-      { key: "shift+down", cmd: "ctree.jump_down" },
-      { key: "shift+j", cmd: "ctree.jump_down" },
-      { key: "g", cmd: "ctree.first" },
-      { key: "shift+g", cmd: "ctree.last" },
-      { key: "[", cmd: "ctree.prev_branch" },
-      { key: "]", cmd: "ctree.next_branch" },
-      { key: "left", cmd: "ctree.fold" },
-      { key: "h", cmd: "ctree.fold" },
-      { key: "right", cmd: "ctree.unfold" },
-      { key: "l", cmd: "ctree.unfold" },
-      { key: "e", cmd: "ctree.toggle" },
-      { key: "return", cmd: "ctree.go" },
-      { key: "b", cmd: "ctree.branch" },
-      { key: "c", cmd: "ctree.crop" },
-      { key: "t", cmd: "ctree.crop_toggle_mode" },
-      { key: "space", cmd: "ctree.mark" },
-      { key: "a", cmd: "ctree.auto" },
-      { key: "x", cmd: "ctree.undo" },
-      { key: "m", cmd: "ctree.merge" },
-      { key: "i", cmd: "ctree.inspector" },
-      { key: "u", cmd: "ctree.consumers" },
-      { key: "y", cmd: "ctree.copy" },
-      { key: "1", cmd: "ctree.mode_duration" },
-      { key: "2", cmd: "ctree.mode_turns" },
-      { key: "3", cmd: "ctree.mode_calls" },
-      { key: "shift+d", cmd: "ctree.decisions" },
-      { key: "shift+e", cmd: "ctree.export" },
-      { key: "shift+l", cmd: "ctree.label" },
-      { key: "f", cmd: "ctree.filter" },
-      { key: "/", cmd: "ctree.search" },
-      { key: "q", cmd: "ctree.back" },
-      { key: "escape", cmd: "ctree.back" },
-    ],
+    bindings: bindingsFor(props.options.keybinds),
   })
   onCleanup(() => off())
 

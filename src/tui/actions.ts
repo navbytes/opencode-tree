@@ -232,11 +232,25 @@ export function setLabel(ctx: ActionContext, input: { sessionID: string; message
   ctx.store.record(treeId, "label.set", { sessionID: input.sessionID, messageID: input.messageID, label: input.label }, "tui")
 }
 
-/** Record a crop (the server half applies it on the next turn). */
-export function applyCrop(ctx: ActionContext, data: CropAppliedData): string {
+/** Record a crop (the server half applies it on the next turn). With `hard`, result crops
+ *  additionally set OpenCode's own `state.time.compacted` flag on the tool part, so the
+ *  TUI renders "[Old tool result content cleared]" and hides the text (DESIGN.md §6.5). */
+export async function applyCrop(ctx: ActionContext, data: CropAppliedData, opts: { hard?: boolean } = {}): Promise<string> {
   const treeId = ctx.store.ensureTree(data.sessionID, "tui")
   const entry = ctx.store.record(treeId, "crop.applied", data, "tui")
+  if (opts.hard && data.mode === "result") await setCompacted(ctx, data.sessionID, data.targets.map((t) => ({ messageID: t.messageID, partID: t.partID })), Date.now())
   return entry.id
+}
+
+async function setCompacted(ctx: ActionContext, sessionID: string, targets: { messageID: string; partID?: string }[], value: number | undefined): Promise<void> {
+  for (const t of targets) {
+    if (!t.partID) continue
+    const part = (ctx.api.state.part(t.messageID) as unknown as any[]).find((p) => p.id === t.partID)
+    if (!part || part.type !== "tool" || part.state?.status !== "completed") continue
+    const next = { ...part, state: { ...part.state, time: { ...(part.state.time ?? {}), compacted: value } } }
+    if (value === undefined) delete next.state.time.compacted
+    await ctx.api.client.part.update({ sessionID, messageID: t.messageID, partID: t.partID, directory: ctx.directory, ...next } as any).catch((e: unknown) => debug("hardcrop.error", { error: String(e) }))
+  }
 }
 
 /** Execute an undo plan (DESIGN.md §6.6). Returns the session to show afterwards. */
@@ -247,10 +261,13 @@ export async function executeUndo(ctx: ActionContext, sessionID: string, plan: U
     case "nothing":
       ctx.api.ui.toast({ message: "nothing to undo on this path" })
       return undefined
-    case "restore-crop":
+    case "restore-crop": {
       ctx.store.record(treeId, "crop.restored", { cropID: plan.cropID }, "tui")
+      const crop = ctx.store.stateFor(treeId).crops[plan.cropID]
+      if (crop && crop.mode === "result") await setCompacted(ctx, sessionID, crop.targets.map((t) => ({ messageID: t.messageID, partID: t.partID })), undefined)
       ctx.api.ui.toast({ variant: "success", message: `↶ restored ${plan.mode === "turn" ? "dropped turn" : "cropped result"} (~${Math.round(plan.estTokens / 100) / 10}k tokens back in context)` })
       return undefined
+    }
     case "abandon-branch": {
       await abortIfBusy(ctx, sessionID)
       ctx.store.record(treeId, "branch.closed", { sessionID: plan.sessionID, status: "abandoned" }, "tui")

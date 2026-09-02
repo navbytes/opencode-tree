@@ -14,7 +14,14 @@ From a checkout: `bun install && bun run build`, then list `/abs/path/dist/serve
 `/abs/path/dist/tui.js` instead of the package name.
 
 Options: `storage` `"local"` (default, `.opencode/context-tree/` in the worktree, gitignored)
-or `"global"` (OpenCode's state dir); `jumpSummary` `"ask"` (default, Pi behaviour) or `"never"`.
+or `"global"` (OpenCode's state dir); `jumpSummary` `"ask"` (default, Pi behaviour) or `"never"`;
+`hardCrop` `true` also sets OpenCode's own "compacted" flag on cropped tool parts so the
+transcript shows `[Old tool result content cleared]` (reversible by undo, but it touches
+OpenCode storage — off by default); `keybinds` overrides any route key by command name,
+e.g. `{ "keybinds": { "open": "ctrl+t", "up": "k,up", "copy": "none" } }` — names are
+`open up down jump_up jump_down first last prev_branch next_branch fold unfold toggle go
+branch label filter search back crop crop_toggle_mode mark auto undo merge inspector
+consumers copy mode_duration mode_turns mode_calls decisions export`.
 
 ## The loop
 

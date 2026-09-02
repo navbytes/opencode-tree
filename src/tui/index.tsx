@@ -14,12 +14,30 @@ import { TreeRoute, formatK } from "./route.js"
 
 const BAND_COLOR = { low: "success", healthy: "success", filling: "warning", red: "error" } as const
 
-type Options = { storage: StorageMode; jumpSummary: "ask" | "never" }
+type Options = { storage: StorageMode; jumpSummary: "ask" | "never"; hardCrop: boolean; keybinds: Record<string, string[]>; open: string[] }
+
+/** `"k,up"` or `["k","up"]` → `["k","up"]`; `"none"`/`false` → `[]`. */
+function keys(v: unknown): string[] | undefined {
+  if (v === undefined) return undefined
+  if (v === false || v === "none") return []
+  if (Array.isArray(v)) return v.filter((x): x is string => typeof x === "string")
+  if (typeof v === "string") return v.split(",").map((x) => x.trim()).filter(Boolean)
+  return undefined
+}
 
 function parseOptions(raw: Record<string, unknown> | undefined): Options {
+  const kb = (raw?.["keybinds"] as Record<string, unknown> | undefined) ?? {}
+  const keybinds: Record<string, string[]> = {}
+  for (const [name, v] of Object.entries(kb)) {
+    const k = keys(v)
+    if (k) keybinds[name] = k
+  }
   return {
     storage: raw?.["storage"] === "global" ? "global" : "local",
     jumpSummary: raw?.["jumpSummary"] === "never" ? "never" : "ask",
+    hardCrop: raw?.["hardCrop"] === true,
+    keybinds,
+    open: keys(kb["open"]) ?? ["ctrl+q"],
   }
 }
 
@@ -138,7 +156,7 @@ const tui: TuiPlugin = async (api, rawOptions) => {
         }),
       },
     ],
-    bindings: [{ key: "ctrl+q", cmd: "ctree.open" }],
+    bindings: options.open.map((key) => ({ key, cmd: "ctree.open" })),
   })
 
   api.keymap.registerLayer({
@@ -233,7 +251,7 @@ const tui: TuiPlugin = async (api, rawOptions) => {
           store={store}
           directory={directory}
           sessionID={params?.["sessionID"] as string | undefined}
-          options={{ jumpSummary: options.jumpSummary }}
+          options={{ jumpSummary: options.jumpSummary, hardCrop: options.hardCrop, keybinds: options.keybinds }}
           initialView={params?.["view"] === "decisions" ? "decisions" : "tree"}
         />
       ),
