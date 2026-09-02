@@ -182,7 +182,8 @@ export const server: Plugin = async ({ worktree, client, directory }) => {
       const branch = state.sessions[input.sessionID]
       if (!branch?.model || branch.status !== "open") return
 
-      const [providerID, modelID] = branch.model.split("/")
+      const providerID = branch.model.split("/")[0]
+      const modelID = branch.model.split("/").slice(1).join("/")
       if (!providerID || !modelID) return
 
       output.message.model = { providerID, modelID }

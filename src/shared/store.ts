@@ -60,7 +60,14 @@ export class JournalStore {
     if (!fs.existsSync(registryPath)) return {}
     const mtimeMs = fs.statSync(registryPath).mtimeMs
     if (this.registryCache && this.registryCache.mtimeMs === mtimeMs) return this.registryCache.data
-    const data = JSON.parse(fs.readFileSync(registryPath, "utf8")) as Record<string, string>
+    let data: Record<string, string> = {}
+    try {
+      const parsed = JSON.parse(fs.readFileSync(registryPath, "utf8")) as unknown
+      if (parsed && typeof parsed === "object") data = Object.fromEntries(Object.entries(parsed as Record<string, unknown>).filter(([, v]) => typeof v === "string")) as Record<string, string>
+    } catch {
+      // a truncated/corrupt registry must never take the hooks down; keep the last good copy
+      data = this.registryCache?.data ?? {}
+    }
     this.registryCache = { mtimeMs, data }
     return data
   }
@@ -75,7 +82,10 @@ export class JournalStore {
     const registry = { ...this.readRegistry() }
     if (registry[sessionID] === treeId) return
     registry[sessionID] = treeId
-    fs.writeFileSync(this.registryPath(), `${JSON.stringify(registry, null, 2)}\n`)
+    // atomic: temp file + rename, so a concurrent reader never sees a partial file
+    const tmp = `${this.registryPath()}.${process.pid}.${Date.now()}.tmp`
+    fs.writeFileSync(tmp, `${JSON.stringify(registry, null, 2)}\n`)
+    fs.renameSync(tmp, this.registryPath())
     this.registryCache = { mtimeMs: fs.statSync(this.registryPath()).mtimeMs, data: registry }
   }
 

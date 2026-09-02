@@ -549,3 +549,80 @@ export function buildTreeView(o: BuildOptions): TreeView {
 
   return { rows, indexById, currentRowId, totalTokens: computeTotalTokens(transcript) }
 }
+
+
+// ---------------------------------------------------------------------------
+// Positional map between spine rows and the current session's copied prefix.
+// ---------------------------------------------------------------------------
+
+export type SpineMap = {
+  /** `${sessionID}:${messageID}` of any spine message → index into the current transcript */
+  index: Map<string, number>
+  /** current-session messageID for a spine message (same for own messages) */
+  toCurrent: (sessionID: string, messageID: string) => string | undefined
+  /** current-session partID for a spine part, by position within the message */
+  partToCurrent: (sessionID: string, messageID: string, partID: string) => string | undefined
+  /** spine owner of a current-session message (itself when past the fork point) */
+  fromCurrent: (currentMessageID: string) => { sessionID: string; messageID: string } | undefined
+  /** spine partID for a current-session part */
+  partFromCurrent: (currentMessageID: string, currentPartID: string) => { sessionID: string; messageID: string; partID: string } | undefined
+}
+
+/** Built from the *unfiltered* transcripts, so hidden rows never shift positions
+ *  (unlike a map derived from the rendered rows). */
+export function buildSpineMap(o: Pick<BuildOptions, "state" | "transcripts" | "currentSessionID">): SpineMap {
+  const current = o.transcripts[o.currentSessionID]
+  const index = new Map<string, number>()
+  const owner: { sessionID: string; messageID: string }[] = []
+  if (current) {
+    const spine = [...ancestorChainOf(o.state, o.currentSessionID), o.currentSessionID]
+    let from = 0
+    for (let s = 0; s < spine.length; s++) {
+      const sessionID = spine[s]!
+      const own = o.transcripts[sessionID]
+      const child = spine[s + 1]
+      const childBranch = child ? o.state.sessions[child] : undefined
+      if (s < spine.length - 1) {
+        const anchorIndex = own ? own.messages.findIndex((m) => m.id === childBranch?.anchorMessageID) : -1
+        if (own && anchorIndex !== -1) {
+          own.messages.slice(from, anchorIndex + 1).forEach((m, i) => {
+            index.set(`${sessionID}:${m.id}`, from + i)
+            owner[from + i] = { sessionID, messageID: m.id }
+          })
+          from = anchorIndex + 1
+        }
+        continue
+      }
+      current.messages.slice(from).forEach((m, i) => {
+        index.set(`${sessionID}:${m.id}`, from + i)
+        owner[from + i] = { sessionID, messageID: m.id }
+      })
+    }
+  }
+  const messageAt = (i: number) => current?.messages[i]
+  const toCurrent = (sessionID: string, messageID: string) => {
+    const i = index.get(`${sessionID}:${messageID}`)
+    return i === undefined ? undefined : messageAt(i)?.id
+  }
+  const partToCurrent = (sessionID: string, messageID: string, partID: string) => {
+    const i = index.get(`${sessionID}:${messageID}`)
+    if (i === undefined) return undefined
+    const src = o.transcripts[sessionID]?.messages.find((m) => m.id === messageID)
+    const k = src?.parts.findIndex((p) => p.id === partID) ?? -1
+    return k === -1 ? undefined : messageAt(i)?.parts[k]?.id
+  }
+  const fromCurrent = (currentMessageID: string) => {
+    const i = current?.messages.findIndex((m) => m.id === currentMessageID) ?? -1
+    return i === -1 ? undefined : owner[i]
+  }
+  const partFromCurrent = (currentMessageID: string, currentPartID: string) => {
+    const o1 = fromCurrent(currentMessageID)
+    if (!o1) return undefined
+    const cur = current?.messages.find((m) => m.id === currentMessageID)
+    const k = cur?.parts.findIndex((p) => p.id === currentPartID) ?? -1
+    const src = o.transcripts[o1.sessionID]?.messages.find((m) => m.id === o1.messageID)
+    const partID = k === -1 ? undefined : src?.parts[k]?.id
+    return partID ? { ...o1, partID } : undefined
+  }
+  return { index, toCurrent, partToCurrent, fromCurrent, partFromCurrent }
+}

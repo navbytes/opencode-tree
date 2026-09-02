@@ -5,7 +5,8 @@
  *
  * Pure, no OpenCode/opentui/solid-js imports — see test/core-purity.test.ts.
  */
-import type { Row, TreeView } from "./tree.js"
+import type { Row } from "./tree.js"
+import type { Transcript } from "./transcript.js"
 
 export type JumpPlan =
   | { kind: "noop"; reason: string }
@@ -19,66 +20,33 @@ export type JumpPlan =
       mode: "redo" | "continue"
     }
 
-/** Is `row` the last turn/step row belonging to its session in `view.rows`? This is
- *  "the tip" in DESIGN.md §6.2's sense (the session's last *message*, which may be an
- *  assistant/tool step, not necessarily its last *user* turn — unlike `TurnRow.isTip`). */
-function isLastRowOfSession(row: Row, view: TreeView): boolean {
-  const idx = view.indexById[row.id]
-  if (idx === undefined) return false
-  for (let i = idx + 1; i < view.rows.length; i++) {
-    const r = view.rows[i]!
-    if (r.kind !== "branch" && r.sessionID === row.sessionID) return false
-  }
-  return true
-}
-
-/** The messageID of the next turn/step row belonging to `row`'s session after `row`
- *  (i.e. the first row whose messageID differs from `row`'s) — the fork boundary for
- *  "continue from here" on a step row. */
-function nextMessageIdAfter(row: Row, view: TreeView): string | undefined {
-  if (row.kind === "branch") return undefined
-  const idx = view.indexById[row.id]
-  if (idx === undefined) return undefined
-  for (let i = idx + 1; i < view.rows.length; i++) {
-    const r = view.rows[i]!
-    if (r.kind !== "branch" && r.sessionID === row.sessionID && r.messageID !== row.messageID) return r.messageID
-  }
-  return undefined
-}
-
 /**
- * Plan the jump for a selected row (DESIGN.md §6.2):
+ * Plan the jump for a selected row (DESIGN.md §6.2), against the *unfiltered*
+ * transcripts so search/filters never change what a jump does:
  * - a **branch row** → switch to that branch's session (same as its tip);
- * - a **turn/step row that is the tip of a non-current session** → switch to that
- *   session (no fork) — Pi's "move the leaf to an existing leaf";
- * - a **turn row** elsewhere → fork at that user message, prefilled with its text
- *   ("redo this turn on a new branch");
- * - a **step row** elsewhere → fork at the *next* message after its assistant
- *   message, with an empty prompt ("continue from here");
- * - the **tip row of the current session** → noop, "already here".
+ * - a **turn/step row on the last message of a non-current session** → switch to it
+ *   (no fork) — Pi's "move the leaf to an existing leaf";
+ * - a **turn row** elsewhere → fork at that user message, prefilled with its text;
+ * - a **step row** elsewhere → fork at the *next* message after its assistant message;
+ * - the **last message of the current session** → noop, "already here".
  */
-export function planJump(row: Row, view: TreeView, opts: { currentSessionID: string }): JumpPlan {
-  if (row.kind === "branch") {
-    return { kind: "switch", sessionID: row.sessionID }
-  }
-
-  const last = isLastRowOfSession(row, view)
-
-  if (row.sessionID === opts.currentSessionID) {
+export function planJump(row: Row, ctx: { transcripts: Record<string, Transcript>; currentSessionID: string }): JumpPlan {
+  if (row.kind === "branch") return { kind: "switch", sessionID: row.sessionID }
+  const tr = ctx.transcripts[row.sessionID]
+  if (!tr) return { kind: "noop", reason: "that session is not loaded" }
+  const idx = tr.messages.findIndex((m) => m.id === row.messageID)
+  if (idx === -1) return { kind: "noop", reason: "message not found" }
+  const last = idx === tr.messages.length - 1
+  if (row.sessionID === ctx.currentSessionID) {
     if (last) return { kind: "noop", reason: "already here" }
   } else if (last) {
     return { kind: "switch", sessionID: row.sessionID }
   }
-
   if (row.kind === "turn") {
-    return { kind: "fork", sessionID: row.sessionID, messageID: row.messageID, prefill: row.preview, mode: "redo" }
+    const text = tr.messages[idx]!.parts.filter((p) => p.type === "text").map((p) => p.text ?? "").join("\n")
+    return { kind: "fork", sessionID: row.sessionID, messageID: row.messageID, prefill: text || row.preview, mode: "redo" }
   }
-
-  const nextMessageID = nextMessageIdAfter(row, view)
-  if (nextMessageID === undefined) {
-    // No later message in view to fork before (shouldn't happen once `last` above
-    // has been handled) — fall back to switching rather than mis-forking.
-    return { kind: "switch", sessionID: row.sessionID }
-  }
-  return { kind: "fork", sessionID: row.sessionID, messageID: nextMessageID, mode: "continue" }
+  const next = tr.messages[idx + 1]
+  if (!next) return { kind: "switch", sessionID: row.sessionID }
+  return { kind: "fork", sessionID: row.sessionID, messageID: next.id, mode: "continue" }
 }

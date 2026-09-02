@@ -10,6 +10,7 @@ import type { UndoPlan } from "../core/undo.js"
 import { DECISION_SYSTEM, branchTranscriptText, buildDecisionDraftPrompt, decisionMessageText, decisionTemplate, openSiblings } from "../core/decision.js"
 import { editInExternalEditor, hasEditor } from "./editor.js"
 import { debug } from "../shared/debug.js"
+import { fetchTranscript } from "./transcripts.js"
 
 export type JumpPlan =
   | { kind: "noop"; reason: string }
@@ -85,9 +86,11 @@ export async function forkBranch(
   input: { sessionID: string; messageID: string; name?: string; kind: "explicit" | "jump" | "redo"; branchModel?: string; trunkModel?: string; title?: string },
 ): Promise<string> {
   const treeId = ctx.store.ensureTree(input.sessionID, "tui")
-  // journal anchors are the last *shared* message (inclusive); OpenCode's fork boundary is exclusive
-  const parentMsgs = ctx.api.state.session.messages(input.sessionID)
+  // journal anchors are the last *shared* message (inclusive); OpenCode's fork boundary is exclusive.
+  // The owning session may not be loaded in this TUI (jumping into an ancestor), so read it via the SDK.
+  const parentMsgs = (await fetchTranscript(ctx.api, input.sessionID, ctx.directory)).messages
   const boundary = parentMsgs.findIndex((m) => m.id === input.messageID)
+  if (boundary === -1) throw new Error("fork point not found in the session")
   const anchorMessageID = boundary > 0 ? parentMsgs[boundary - 1]!.id : ""
   const forked = await ctx.api.client.session.fork({ sessionID: input.sessionID, messageID: input.messageID, directory: ctx.directory })
   const forkedID = (forked.data as any)?.id as string | undefined
@@ -249,7 +252,7 @@ async function setCompacted(ctx: ActionContext, sessionID: string, targets: { me
     if (!part || part.type !== "tool" || part.state?.status !== "completed") continue
     const next = { ...part, state: { ...part.state, time: { ...(part.state.time ?? {}), compacted: value } } }
     if (value === undefined) delete next.state.time.compacted
-    await ctx.api.client.part.update({ sessionID, messageID: t.messageID, partID: t.partID, directory: ctx.directory, ...next } as any).catch((e: unknown) => debug("hardcrop.error", { error: String(e) }))
+    await ctx.api.client.part.update({ sessionID, messageID: t.messageID, partID: t.partID, directory: ctx.directory, part: next } as any).catch((e: unknown) => debug("hardcrop.error", { error: String(e) }))
   }
 }
 

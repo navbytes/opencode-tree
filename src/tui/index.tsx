@@ -4,7 +4,7 @@
  * `/branch`, `/label`, the `ctree` route, and the prompt-side gauge slot.
  */
 import type { TuiPluginApi, TuiPlugin } from "@opencode-ai/plugin/tui"
-import { createMemo } from "solid-js"
+import { createEffect, createMemo, createSignal } from "solid-js"
 import { bandFor, contextSizeOf, type MinimalMessage, type MinimalPart } from "../core/tokens.js"
 import { JournalStore, type StorageMode } from "../shared/store.js"
 import { debug } from "../shared/debug.js"
@@ -290,30 +290,37 @@ const tui: TuiPlugin = async (api, rawOptions) => {
           return model?.limit?.context
         })
         const reserve = () => (api.state.config as { compaction?: { reserved?: number } }).compaction?.reserved ?? 16_384
-        // trend + attribution: compare with the previous render of this slot
+        // trend + attribution: an effect compares each new size with the previous one
+        // (side effects and closure state stay out of the memo graph)
+        const [trend, setTrend] = createSignal("")
         let prevTokens = 0
         let prevParts = new Map<string, number>()
         let redNudged = false
         let guardNudged = false
-        const trend = createMemo(() => {
-          const now = size().tokens
-          const parts = new Map<string, number>()
-          let biggest: { key: string; delta: number } | undefined
+        const partSizes = createMemo(() => {
+          const parts = new Map<string, { len: number; key: string }>()
           for (const m of api.state.session.messages(props.session_id)) {
             for (const p of api.state.part(m.id) as unknown as { id: string; type: string; tool?: string; text?: string; state?: { output?: string } }[]) {
               const len = p.type === "tool" ? (p.state?.output?.length ?? 0) : (p.text?.length ?? 0)
-              parts.set(p.id, len)
-              const delta = len - (prevParts.get(p.id) ?? 0)
-              if (delta > 0 && (!biggest || delta > biggest.delta)) biggest = { key: p.type === "tool" ? (p.tool ?? "tool") : p.type === "text" ? "text" : p.type, delta }
+              parts.set(p.id, { len, key: p.type === "tool" ? (p.tool ?? "tool") : p.type === "text" ? "text" : p.type })
             }
           }
-          const rise = prevTokens > 0 ? (now - prevTokens) / prevTokens : 0
-          const out = rise >= 0.1 && biggest ? ` ▲ +${Math.round(rise * 100)}% (${biggest.key})` : ""
-          prevTokens = now
-          prevParts = parts
-          return out
+          return parts
         })
-        createMemo(() => {
+        createEffect(() => {
+          const now = size().tokens
+          const parts = partSizes()
+          let biggest: { key: string; delta: number } | undefined
+          for (const [id, { len, key }] of parts) {
+            const delta = len - (prevParts.get(id) ?? 0)
+            if (delta > 0 && (!biggest || delta > biggest.delta)) biggest = { key, delta }
+          }
+          const rise = prevTokens > 0 ? (now - prevTokens) / prevTokens : 0
+          if (now !== prevTokens) setTrend(rise >= 0.1 && biggest ? ` ▲ +${Math.round(rise * 100)}% (${biggest.key})` : "")
+          prevTokens = now
+          prevParts = new Map([...parts].map(([id, v]) => [id, v.len]))
+        })
+        createEffect(() => {
           const b = band()
           if (b === "red" && !redNudged) {
             redNudged = true

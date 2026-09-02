@@ -9,7 +9,7 @@ import { planJump } from "../core/actions.js"
 import { foldJournal, type TreeState } from "../core/journal.js"
 import { cycleFilter, moveSelection, nextBranchIndex, resolveSelection, toggleExpanded } from "../core/navigation.js"
 import { bandFor } from "../core/tokens.js"
-import { buildTreeView, type Filter, type Row } from "../core/tree.js"
+import { buildSpineMap, buildTreeView, type Filter, type Row } from "../core/tree.js"
 import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
 import { applyCrop, createNamedBranch, executeJump, executeUndo, mergeBranch, setLabel, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
@@ -153,29 +153,52 @@ export function TreeRoute(props: TreeRouteProps) {
     return (sessionID && store.stateForSession(sessionID)) || foldJournal([], "none")
   })
 
-  // Sessions in the tree other than the current one: fetched once per tick through the SDK.
+  // Sessions in the tree other than the current one, through the SDK. Closed/forgotten
+  // branches are immutable, so they are fetched once; open ones are refreshed per tick.
+  // A sequence number drops responses that were overtaken by a newer run.
+  let fetchSeq = 0
   createEffect(
     on([state, tick], async () => {
       if (!sessionID) return
+      const seq = ++fetchSeq
+      const st = state()
       const ids = new Set<string>()
-      for (const id of Object.keys(state().sessions)) ids.add(id)
-      for (const b of Object.values(state().sessions)) ids.add(b.parentSessionID)
-      if (state().root) ids.add(state().root!)
+      for (const id of Object.keys(st.sessions)) ids.add(id)
+      for (const b of Object.values(st.sessions)) ids.add(b.parentSessionID)
+      if (st.root) ids.add(st.root)
       ids.delete(sessionID)
-      const loaded = await Promise.all([...ids].map((id) => fetchTranscript(api, id, directory)))
-      setOthers(Object.fromEntries(loaded.map((tr) => [tr.sessionID, tr])))
+      const cached = others()
+      const wanted = [...ids].filter((id) => !cached[id] || (st.sessions[id]?.status ?? "open") === "open")
+      if (wanted.length === 0) return
+      const loaded = await Promise.all(wanted.map((id) => fetchTranscript(api, id, directory)))
+      if (seq !== fetchSeq) return
+      setOthers((prev) => ({ ...prev, ...Object.fromEntries(loaded.map((tr) => [tr.sessionID, tr])) }))
     }),
   )
+
+  const transcripts = createMemo(() => (sessionID ? { ...others(), [sessionID]: liveTranscript(api, sessionID) } : {}))
+  const spine = createMemo(() => buildSpineMap({ state: state(), transcripts: transcripts(), currentSessionID: sessionID ?? "" }))
 
   const view = createMemo(() => {
     if (!sessionID) return { rows: [] as Row[], indexById: {}, currentRowId: undefined, totalTokens: 0 }
     const st = state()
     const labels: Record<string, string> = {}
     for (const l of Object.values(st.labels)) labels[l.messageID] = l.label
-    const crops = st.activeCrops(sessionID).flatMap((c) => c.targets.map((x) => ({ messageID: x.messageID, partID: x.partID })))
+    // crop targets are recorded with the current session's ids; prefix rows carry the
+    // ancestor's, so translate through the spine map before the view compares them
+    const crops = st.activeCrops(sessionID).flatMap((c) =>
+      c.targets.map((x) => {
+        if (x.partID) {
+          const owner = spine().partFromCurrent(x.messageID, x.partID)
+          return owner ? { messageID: owner.messageID, partID: owner.partID } : { messageID: x.messageID, partID: x.partID }
+        }
+        const owner = spine().fromCurrent(x.messageID)
+        return { messageID: owner?.messageID ?? x.messageID, partID: undefined }
+      }),
+    )
     return buildTreeView({
       state: st,
-      transcripts: { ...others(), [sessionID]: liveTranscript(api, sessionID) },
+      transcripts: transcripts(),
       currentSessionID: sessionID,
       expanded: expanded(),
       filter: filter(),
@@ -218,41 +241,16 @@ export function TreeRoute(props: TreeRouteProps) {
   // ---- crop mode -----------------------------------------------------------
   // Crops act on the *current* session's context. Spine rows above the fork point carry
   // the ancestor's message IDs, but the current session holds a positional copy of that
-  // prefix, so the k-th distinct depth-0 message maps onto current.messages[k].
+  // prefix; the spine map (built from unfiltered transcripts) translates both ways.
   const live = () => (sessionID ? liveTranscript(api, sessionID) : undefined)
-  const rowToCurrent = createMemo(() => {
-    const map = new Map<string, { messageID: string; partIndex: Record<string, number> }>()
-    const lv = live()
-    if (!lv) return map
-    let k = -1
-    let lastKey = ""
-    for (const r of view().rows) {
-      if (r.kind === "branch" || r.depth > 0) continue
-      const key = `${r.sessionID}:${r.messageID}`
-      if (key !== lastKey) {
-        k++
-        lastKey = key
-      }
-      const cur = lv.messages[k]
-      if (!cur) continue
-      const partIndex: Record<string, number> = {}
-      cur.parts.forEach((p, i) => (partIndex[p.id] = i))
-      map.set(key, { messageID: cur.id, partIndex })
-    }
-    return map
-  })
   const currentMessageOf = (row: Row): string | undefined => {
     if (row.kind === "branch") return undefined
     if (row.sessionID === sessionID) return row.messageID
-    return rowToCurrent().get(`${row.sessionID}:${row.messageID}`)?.messageID
+    return spine().toCurrent(row.sessionID, row.messageID)
   }
   const currentPartOf = (row: Row & { kind: "step" }): string | undefined => {
     if (row.sessionID === sessionID) return row.partID
-    // same position within the copied message
-    const other = others()[row.sessionID]?.messages.find((m) => m.id === row.messageID)
-    const idx = other?.parts.findIndex((p) => p.id === row.partID) ?? -1
-    const cur = live()?.messages.find((m) => m.id === currentMessageOf(row))
-    return idx >= 0 ? cur?.parts[idx]?.id : undefined
+    return spine().partToCurrent(row.sessionID, row.messageID, row.partID)
   }
   const alreadyCropped = createMemo(() => {
     const set = new Set<string>()
@@ -447,6 +445,22 @@ export function TreeRoute(props: TreeRouteProps) {
   // ---- consumers -------------------------------------------------------------
   const consumerRows = createMemo(() => (live() ? consumers(live()!, { cropped: alreadyCropped() }) : []))
 
+  /** From the consumers panel: back to the tree in crop mode with that source's
+   *  unprotected results pre-marked (DESIGN.md §7.4). */
+  function cropConsumer() {
+    const c = consumerRows()[consumerIndex()]
+    setPanel("tree")
+    if (!c || c.kind !== "tool") {
+      setCropMode("result")
+      api.ui.toast({ message: c ? `${c.source} is not a tool result; mark rows by hand` : "nothing to crop" })
+      return
+    }
+    setCropMode("result")
+    const picks = resultCands().filter((r) => r.tool === c.source && r.protections.length === 0)
+    setMarked(new Set<string>(picks.map((r) => r.partID)))
+    api.ui.toast({ message: picks.length ? `marked ${picks.length} unprotected ${c.source} result${picks.length === 1 ? "" : "s"} — ⏎ to apply` : `every ${c.source} result is protected; mark with space (twice) to override` })
+  }
+
   function copySelected() {
     const row = current()
     if (!row || row.kind === "branch") return
@@ -571,7 +585,7 @@ export function TreeRoute(props: TreeRouteProps) {
   async function jump() {
     const row = current()
     if (!row || !sessionID) return
-    const plan = planJump(row, view(), { currentSessionID: sessionID })
+    const plan = planJump(row, { transcripts: transcripts(), currentSessionID: sessionID })
     debug("route.jump", { row: { kind: row.kind, id: row.id }, plan })
     await guarded("jump", async () => {
       if (plan.kind === "noop") {
@@ -733,7 +747,7 @@ export function TreeRoute(props: TreeRouteProps) {
       { name: "ctree.fold", hidden: true, run: () => foldOrUnfold(false) },
       { name: "ctree.unfold", hidden: true, run: () => foldOrUnfold(true) },
       { name: "ctree.toggle", hidden: true, run: () => foldOrUnfold(!(current()?.kind === "branch" && (current() as Row & { kind: "branch" }).expanded)) },
-      { name: "ctree.go", hidden: true, run: () => void (panel() === "decisions" ? jumpToDecision() : cropMode() ? applyMarked() : jump()) },
+      { name: "ctree.go", hidden: true, run: () => void (panel() === "decisions" ? jumpToDecision() : panel() === "consumers" ? cropConsumer() : cropMode() ? applyMarked() : jump()) },
       { name: "ctree.branch", hidden: true, run: () => void branch() },
       { name: "ctree.label", hidden: true, run: () => void label() },
       {
@@ -757,6 +771,11 @@ export function TreeRoute(props: TreeRouteProps) {
         name: "ctree.crop",
         hidden: true,
         run: () => {
+          if (panel() === "consumers") {
+            cropConsumer()
+            return
+          }
+          if (panel() !== "tree") return
           if (cropMode()) {
             setCropMode(undefined)
             setMarked(new Set<string>())
