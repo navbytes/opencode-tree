@@ -9,7 +9,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { activeCrops } from "../core/journal.js"
 import { applyCrops, type CropSpec, type MinimalMessage } from "../core/crop.js"
-import { JournalStore } from "./store.js"
+import { JournalStore } from "../shared/store.js"
 
 export const server: Plugin = async ({ worktree }) => {
   const store = new JournalStore({ worktree })

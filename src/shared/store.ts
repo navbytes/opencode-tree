@@ -7,7 +7,7 @@
  */
 import fs from "node:fs"
 import path from "node:path"
-import { foldJournal, parseJournal, type JournalEntry, type TreeState } from "../core/journal.js"
+import { foldJournal, parseJournal, type JournalActor, type JournalEntry, type TreeState } from "../core/journal.js"
 
 export type StorageMode = "local" | "global"
 
@@ -104,6 +104,38 @@ export class JournalStore {
     this.readEntries(treeId) // populates/refreshes the cache as a side effect
     const cached = this.cache.get(treeId)
     return cached?.state ?? foldJournal([], treeId)
+  }
+
+  /** Build a journal envelope. IDs are time-sortable so a fold's tie-breaks are stable. */
+  static entry<T extends JournalEntry["type"]>(
+    type: T,
+    data: Extract<JournalEntry, { type: T }>["data"],
+    actor: JournalActor,
+  ): JournalEntry {
+    return { v: 1, id: `e_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 8)}`, ts: Date.now(), type, actor, data } as JournalEntry
+  }
+
+  /** Append a typed entry (envelope built here). Returns the entry so callers can reference its id. */
+  record<T extends JournalEntry["type"]>(
+    treeId: string,
+    type: T,
+    data: Extract<JournalEntry, { type: T }>["data"],
+    actor: JournalActor,
+  ): JournalEntry {
+    // generic forwarding trips TS's intersection of all data shapes; the public signature stays typed
+    const entry = JournalStore.entry(type, data as never, actor)
+    this.append(treeId, entry)
+    return entry
+  }
+
+  /** The tree a session belongs to, creating a fresh tree rooted at the session when it has none. */
+  ensureTree(sessionID: string, actor: JournalActor): string {
+    const existing = this.treeIdFor(sessionID)
+    if (existing) return existing
+    const treeId = `t_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 6)}`
+    this.registerSession(sessionID, treeId)
+    this.record(treeId, "tree.created", { rootSessionID: sessionID }, actor)
+    return treeId
   }
 
   /** Folded tree state for a session, or `undefined` if the session has no tree yet. */
