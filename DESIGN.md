@@ -168,10 +168,11 @@ export default { id: "opencode-context-tree", tui: async (api, options, meta) =>
 ### 4.1 Journal (plugin-owned, append-only)
 
 One JSONL file per tree, `ctree/<treeId>.jsonl`, plus `registry.json` mapping
-`sessionID → treeId`. Location (option `storage`): `global` →
-`<opencode state dir>/plugins/opencode-context-tree/` (Linux `~/.local/state/opencode`),
-or `local` → `<worktree>/.opencode/context-tree/` (commit it or gitignore it — local
-makes the tree travel with the repo). Every line:
+`sessionID → treeId`. Location (option `storage`, default **`local`**):
+`local` → `<worktree>/.opencode/context-tree/` (gitignored by default via a generated
+`.gitignore` inside it; commit it deliberately if teammates should see decisions and
+branch history), or `global` → `<opencode state dir>/plugins/opencode-context-tree/`
+(Linux `~/.local/state/opencode`). Every line:
 
 ```jsonc
 { "v": 1, "id": "e_01J…", "ts": 1788300000000, "type": "<kind>", "actor": "tui|server|cli", "data": { … } }
@@ -182,6 +183,7 @@ makes the tree travel with the repo). Every line:
 | `tree.created` | `{ rootSessionID }` | first time a session is touched by the plugin |
 | `branch.opened` | `{ sessionID, parentSessionID, anchorMessageID, name?, trunkModel?, branchModel?, kind: "explicit" \| "jump" \| "redo" }` | a fork we made (via `/branch`, or by jumping in the tree) |
 | `branch.closed` | `{ sessionID, status: "squashed" \| "rejected" \| "discarded" \| "abandoned", decisionMessageID?, note? }` | `/merge` result or undo of `/branch` |
+| `summary.recorded` | `{ sessionID, messageID, fromSessionID, fromMessageID }` | a Pi-style auto summary injected on jump (◇, unreviewed) |
 | `decision.recorded` | `{ sessionID, messageID, forkSessionID, branchName, siblings: [{ name, reason }] }` | the ◆ record message we wrote into the trunk |
 | `crop.applied` | `{ sessionID, mode: "result" \| "turn", targets: [{ messageID, partID?, callID?, tool?, estTokens, sha8 }], anchorMessageID }` | what to stub / drop, by stable IDs |
 | `crop.restored` | `{ cropID }` | undo of a crop |
@@ -285,10 +287,18 @@ If the current session is streaming, we abort it first (`session.abort`) and say
 as Pi does since #7022. The old branch is untouched and stays visible. Undo: `x`
 closes the jump branch as `abandoned` and returns to where you were.
 
-Pi's optional *summarize the abandoned branch* prompt is intentionally **not** offered
-here: that is what `/merge` is for, with a human gate. A `jumpSummary: "ask" | "never"`
-option can reintroduce the Pi behaviour (implementation identical to `opencode-tree`:
-helper session + `noReply` injection).
+After a jump that leaves an open path behind, the plugin asks Pi's question:
+**"Summarize the branch you are leaving? No / Summarize / Summarize with custom
+prompt"** (option `jumpSummary`, default `"ask"`; `"never"` for the pure
+`pi-context-tree` stance). *Summarize* generates the Pi-format branch summary (Goal /
+Constraints / Progress / Key decisions / Next steps) in a throw-away helper session,
+deletes it, and injects the text into the destination session with
+`session.prompt({ noReply: true })` prefixed by "The user explored a different
+conversation branch before returning here", tagged `metadata.ctree.kind = "summary"`,
+exactly as `opencode-tree` does. `Esc` in the picker returns to the tree at the same
+row. The summary is journalled (`summary.recorded`) so `/undo` can hide it and the
+decisions view can distinguish ◆ confirmed records from ◇ auto summaries. `/merge`
+remains the reviewed path; a summary is never written when a merge closes the branch.
 
 ### 6.3 `/branch fix-flaky-test [haiku-4.5]`
 
@@ -605,27 +615,15 @@ packages/
 
 ---
 
-## 12. Decisions still open (yours)
+## 12. Decisions made (2026-09-02)
 
-1. **Name and package.** `opencode-context-tree` (mirrors `pi-context-tree`) vs
-   keeping the repo name `opencode-tree` — the latter collides with
-   `@ishaksebsib/opencode-tree` and its `/tree` slash name. Recommendation:
-   package `opencode-context-tree`, slash `/tree` with alias `/ctree`.
-2. **Default storage scope**: `global` (state dir, like the existing plugin) or
-   `local` (`.opencode/context-tree/`, travels with the repo, shareable with teammates
-   through decision records). Recommendation: `local`, gitignored by default.
-3. **Jump summaries**: keep Pi's "summarize the abandoned branch?" prompt on jump
-   (`jumpSummary: "ask"`) or rely solely on `/merge`. Recommendation: `never`, as in
-   `pi-context-tree`.
-4. **Undo of a squash**: hide the ◆ record via the hook (recoverable, but it stays on
-   screen) or delete it from OpenCode storage when idle. Recommendation: hide by
-   default, `undoDeletesRecord: true` opt-in.
-5. **Fork base**: start from `@ishaksebsib/opencode-tree` (MIT, has the route/keymap
-   plumbing) or from scratch with `pi-context-tree`'s `core` ported. Recommendation:
-   port `pi-context-tree` `core` + write the route fresh, reading `opencode-tree` for
-   API usage only — its bundle is monolithic and it has no server half.
-
----
+| # | Decision | Chosen |
+|---|---|---|
+| 1 | Package and slash names | **`opencode-context-tree`**; slash `/tree` with alias `/ctree`; headless server commands are `/ctree …`. The `/tree` name only collides if `@ishaksebsib/opencode-tree` is installed alongside. |
+| 2 | Journal location | **Local**, `<worktree>/.opencode/context-tree/`, gitignored by default. `storage: "global"` remains an option. |
+| 3 | Summarize on jump | **Ask every time** (Pi behaviour): No / Summarize / Custom prompt. `jumpSummary: "never"` opts out. Summaries are journalled as ◇ unreviewed and are distinct from ◆ merge records. |
+| 4 | Undo of a squash | **Hide the ◆ record from the model, keep it on screen.** Journal marks it inactive; the hook drops it; OpenCode storage untouched. No delete path in v1. |
+| 5 | Code base | **From scratch, spec-driven.** Port the `pi-context-tree` *semantics* (merge modes, crop protections, undo rules, gauge bands, decision template) and its *method* (pure `core` reducers, journal fold, golden fixtures, table-driven view-model tests), but write all code against OpenCode's message/part/session model. Do not fork `@ishaksebsib/opencode-tree` (unmaintained) or copy Pi entry-based code; read both only as API references. Reliability rule: every OpenCode API the plugin depends on gets an integration test against `opencode serve` with a mock provider before it is used by a feature. |
 
 ## Appendix A — sources
 

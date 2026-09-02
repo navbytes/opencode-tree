@@ -5,7 +5,7 @@ Pi-style context tree for [OpenCode](https://opencode.ai), with the
 (`/branch`, `/merge`, `/crop`, `/undo`) and a DeepSeek-Harness-style trajectory view
 (timeline lanes, per-step tokens and timing, inspector) in one screen.
 
-**Status: design phase.** Read [DESIGN.md](./DESIGN.md) — it contains the research
+**Status: design phase, decisions made (see DESIGN.md §12).** Read [DESIGN.md](./DESIGN.md) — it contains the research
 (Pi, `pi-context-tree`, OpenCode plugin/SDK surface, existing plugins, DSH
 trajectory), the end-user flows, the combined tree + trajectory mockup, the data
 model, architecture, edge cases, and the roadmap.
