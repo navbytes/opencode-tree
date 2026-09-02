@@ -80,6 +80,10 @@ export async function forkBranch(
   input: { sessionID: string; messageID: string; name?: string; kind: "explicit" | "jump" | "redo"; branchModel?: string; trunkModel?: string; title?: string },
 ): Promise<string> {
   const treeId = ctx.store.ensureTree(input.sessionID, "tui")
+  // journal anchors are the last *shared* message (inclusive); OpenCode's fork boundary is exclusive
+  const parentMsgs = ctx.api.state.session.messages(input.sessionID)
+  const boundary = parentMsgs.findIndex((m) => m.id === input.messageID)
+  const anchorMessageID = boundary > 0 ? parentMsgs[boundary - 1]!.id : ""
   const forked = await ctx.api.client.session.fork({ sessionID: input.sessionID, messageID: input.messageID, directory: ctx.directory })
   const forkedID = (forked.data as any)?.id as string | undefined
   if (!forkedID) throw new Error("fork did not return a session id")
@@ -87,11 +91,11 @@ export async function forkBranch(
   ctx.store.record(
     treeId,
     "branch.opened",
-    { sessionID: forkedID, parentSessionID: input.sessionID, anchorMessageID: input.messageID, name: input.name, kind: input.kind, branchModel: input.branchModel, trunkModel: input.trunkModel },
+    { sessionID: forkedID, parentSessionID: input.sessionID, anchorMessageID, name: input.name, kind: input.kind, branchModel: input.branchModel, trunkModel: input.trunkModel },
     "tui",
   )
   if (input.title) await ctx.api.client.session.update({ sessionID: forkedID, directory: ctx.directory, title: input.title }).catch(() => undefined)
-  await mirrorMetadata(ctx, forkedID, { treeId, parentSessionID: input.sessionID, anchorMessageID: input.messageID, name: input.name, status: "open" })
+  await mirrorMetadata(ctx, forkedID, { treeId, parentSessionID: input.sessionID, anchorMessageID, name: input.name, status: "open" })
   await mirrorMetadata(ctx, input.sessionID, { treeId })
   return forkedID
 }

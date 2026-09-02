@@ -19,3 +19,17 @@ cd project && SPIKE_LOG=../spike-plugin.log EDITOR=../fake-editor.sh python3 ../
 - `project/.opencode/plugins/spike-tui.ts` — TUI spike without JSX (`/spikestate`, `/spikeedit` editor gate).
 - `project/.opencode/plugins/spike-route.tsx` + `build.ts` — JSX route spike; build with `bun run build.ts` after `bun add @opencode-ai/plugin@1.18.26 solid-js @opentui/core @opentui/solid @opentui/keymap`, then list `./plugins/spike-route.js` in `tui.json`.
 - `pty-run.py` — minimal pty driver (`--keys "<seconds>:<text>"`, `\r` Enter, `\x03` ctrl+c, `\x1b` Esc); writes raw and ANSI-stripped captures.
+
+## Bun e2e (`bun run test:e2e`)
+
+`test/e2e/harness.ts` wraps the same pieces for `bun test`: `startMock()`, `createProject()`
+(temp git repo seeded from `harness/project/opencode.json`), `installPlugins()`, `startServer()`
+(fresh XDG dirs per run), `runTui()` (pty with timed or wait-for-text keys). Gated by
+`CTREE_E2E=1`; plain `bun test` skips it.
+
+Two Bun quirks the harness works around, both observed on Bun 1.3.11 / OpenCode 1.18.26:
+
+- piping `opencode serve`'s stdio through `Bun.spawn` stalls the server before it listens, so
+  stderr goes to a file and stdout is ignored;
+- a `fetch` issued before the port is bound can hang instead of failing, so every health probe
+  has its own 2 s abort.
