@@ -310,8 +310,13 @@ export interface RunTuiOptions {
   rows?: number
 }
 
-/** Runs the interactive TUI in a pty with scripted keystrokes; returns the ANSI-stripped capture. */
+/** Runs the interactive TUI in a pty with scripted keystrokes; returns the ANSI-stripped capture.
+ *  `runTuiScreens` additionally returns the pyte-rendered screen before each key and at the end. */
 export async function runTui(opts: RunTuiOptions): Promise<string> {
+  return (await runTuiScreens(opts)).text
+}
+
+export async function runTuiScreens(opts: RunTuiOptions): Promise<{ text: string; screens: { label: string; screen: string }[] }> {
   const bin = await ensureOpencode()
   const outDir = await mkdtemp(path.join(tmpdir(), "ctree-e2e-pty-"))
   const outFile = path.join(outDir, "pty.out")
@@ -343,6 +348,14 @@ export async function runTui(opts: RunTuiOptions): Promise<string> {
   await proc.exited
 
   const text = existsSync(`${outFile}.txt`) ? readFileSync(`${outFile}.txt`, "utf8") : ""
+  const raw = existsSync(`${outFile}.screens.txt`) ? readFileSync(`${outFile}.screens.txt`, "utf8") : ""
+  const screens = raw
+    .split("\n===== ")
+    .filter((s) => s.trim())
+    .map((s) => {
+      const nl = s.indexOf(" =====\n")
+      return { label: s.slice(0, nl), screen: s.slice(nl + 7) }
+    })
   await rm(outDir, { recursive: true, force: true }).catch(() => {})
-  return text
+  return { text, screens }
 }

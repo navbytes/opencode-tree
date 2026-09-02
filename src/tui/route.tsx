@@ -14,6 +14,8 @@ import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
 import { applyCrop, createNamedBranch, executeJump, executeUndo, mergeBranch, setLabel, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
 import { exportDecisions } from "../core/decision.js"
+import { buildLanes, columnFor, durationWeighted, fitColumns, sparkline, type LaneMode } from "../core/lanes.js"
+import { bar, consumers } from "../core/consumers.js"
 import { hasEditor } from "./editor.js"
 import fs from "node:fs"
 import path from "node:path"
@@ -98,7 +100,10 @@ export function TreeRoute(props: TreeRouteProps) {
   const [others, setOthers] = createSignal<Record<string, Transcript>>({})
   const [busy, setBusy] = createSignal<string | undefined>()
   const [cropMode, setCropMode] = createSignal<"result" | "turn" | undefined>()
-  const [panel, setPanel] = createSignal<"tree" | "decisions">(props.initialView ?? "tree")
+  const [panel, setPanel] = createSignal<"tree" | "decisions" | "consumers">(props.initialView ?? "tree")
+  const [laneMode, setLaneMode] = createSignal<LaneMode>(api.kv.get<LaneMode>("ctree.lanes", "turns"))
+  const [inspector, setInspector] = createSignal<boolean>(api.kv.get<boolean>("ctree.inspector", true))
+  const [consumerIndex, setConsumerIndex] = createSignal(0)
   const [decisionIndex, setDecisionIndex] = createSignal(0)
   const [marked, setMarked] = createSignal<Set<string>>(new Set())
 
@@ -158,7 +163,7 @@ export function TreeRoute(props: TreeRouteProps) {
   })
 
   const current = () => view().rows[selected()]
-  const height = () => Math.max(8, ((api.renderer as unknown as { height?: number }).height ?? 30) - 7)
+  const height = () => Math.max(8, ((api.renderer as unknown as { height?: number }).height ?? 30) - 7 - (((api.renderer as unknown as { height?: number }).height ?? 30) >= 12 ? 3 : 0))
   const width = () => Math.max(60, ((api.renderer as unknown as { width?: number }).width ?? 120) - 4)
   const windowStart = createMemo(() => {
     const h = height()
@@ -304,6 +309,118 @@ export function TreeRoute(props: TreeRouteProps) {
 
   const band = () => bandFor(view().totalTokens)
   const branchOfCurrent = () => (sessionID ? state().sessions[sessionID] : undefined)
+
+  // ---- lanes (minimap) -----------------------------------------------------
+  const lanes = createMemo(() => (live() ? buildLanes(live()!, laneMode() === "duration" ? "turns" : laneMode()) : { mode: laneMode(), columns: [] }))
+  const laneWidth = () => Math.max(10, Math.min(width() - 46, 80))
+  const laneSeries = createMemo(() => {
+    const l = lanes()
+    if (laneMode() === "duration") {
+      const w = durationWeighted(l, laneWidth())
+      return { input: w.input, output: w.output, tool: w.tool, cellFor: (col: number) => w.input.findIndex((_, i) => w.columnAt(i) === col) }
+    }
+    const n = l.columns.length
+    const cellFor = (col: number) => (n === 0 ? -1 : Math.floor((col * laneWidth()) / Math.max(n, laneWidth())) + (n < laneWidth() ? Math.floor(laneWidth() / n / 2) : 0))
+    return { input: l.columns.map((c) => c.input), output: l.columns.map((c) => c.output), tool: l.columns.map((c) => (c.toolError ? -1 : c.tool)), cellFor }
+  })
+  const cursorCell = createMemo(() => {
+    const row = current()
+    if (!row || row.kind === "branch") return -1
+    // spine rows above the fork carry ancestor ids; map to the current session first
+    const mid = currentMessageOf(row) ?? row.messageID
+    const pid = row.kind === "step" ? (currentPartOf(row) ?? row.partID) : undefined
+    const col = columnFor(lanes(), mid, pid)
+    return col < 0 ? -1 : laneSeries().cellFor(col)
+  })
+  const laneLine = (values: number[]) => {
+    const cells = fitColumns(values.map((v) => Math.max(0, v)), laneWidth())
+    const line = sparkline(cells, laneWidth())
+    const cur = cursorCell()
+    if (cur < 0 || cur >= line.length) return line
+    return `${line.slice(0, cur)}▮${line.slice(cur + 1)}`
+  }
+  const showLanes = () => height() >= 12 && panel() === "tree"
+
+  // ---- inspector -----------------------------------------------------------
+  const showInspector = () => inspector() && panel() === "tree" && width() >= 100
+  const inspectorWidth = () => Math.min(56, Math.max(36, Math.floor(width() * 0.4)))
+  const inspectorLines = createMemo((): { fg: unknown; text: string }[] => {
+    const row = current()
+    if (!row) return []
+    const w = inspectorWidth() - 3
+    const clip = (x: string) => (x.length > w ? `${x.slice(0, w - 1)}…` : x)
+    const out: { fg: unknown; text: string }[] = []
+    const head = (x: string) => out.push({ fg: t.primary, text: clip(x) })
+    const kv = (k: string, v: string) => out.push({ fg: t.text, text: clip(`${k.padEnd(10)}${v}`) })
+    const muted = (x: string) => out.push({ fg: t.textMuted, text: clip(x) })
+    const block = (label: string, text: string, max: number) => {
+      const lines = text.split("\n").filter((l) => l.length)
+      kv(label, lines[0] ?? "")
+      for (const l of lines.slice(1, max)) out.push({ fg: t.text, text: clip(`          ${l}`) })
+      if (lines.length > max) muted(`          … ${lines.length - max} more lines (y to copy)`)
+    }
+    if (row.kind === "branch") {
+      head(`⎇ ${row.name}`)
+      kv("Status", row.status)
+      kv("Parent", others()[row.parentSessionID]?.title ?? row.parentSessionID)
+      kv("Anchor", row.anchorMessageID.slice(0, 20))
+      kv("Turns", String(row.turns))
+      kv("Tokens", `~${formatK(row.tokens)}`)
+      if (row.model) kv("Model", row.model)
+      muted(row.expanded ? "← fold" : "→ expand · ⏎ switch to it")
+      return out
+    }
+    const tr = row.sessionID === sessionID ? live() : others()[row.sessionID]
+    const msg = tr?.messages.find((m) => m.id === row.messageID)
+    const turn = view().rows.slice(0, view().indexById[row.id]! + 1).filter((r) => r.kind === "turn").at(-1)
+    if (row.kind === "turn") {
+      head(`${row.isDecision ? "◆ decision" : row.isSummary ? "◇ summary" : "● user"} · T${row.turn}`)
+      if (row.label) kv("Label", row.label)
+      kv("Tokens", `~${formatK(row.tokens)}`)
+      kv("At", msg ? new Date(msg.time.created).toISOString().slice(11, 19) : "?")
+      block("Text", msg?.parts.map((p) => p.text ?? "").join("\n") ?? row.preview, 14)
+      return out
+    }
+    const part = msg?.parts.find((p) => p.id === row.partID)
+    const stepNo = msg ? msg.parts.filter((p) => p.type === "tool" || p.type === "text").findIndex((p) => p.id === row.partID) + 1 : 0
+    head(`${row.glyph} ${part?.type === "tool" ? part.tool : row.glyph === "◇" ? "compaction" : "assistant"} · T${turn?.kind === "turn" ? turn.turn : "?"} · step ${stepNo}`)
+    kv("Hierarchy", `T${turn?.kind === "turn" ? turn.turn : "?"} › assistant › step ${stepNo}`)
+    if (part?.type === "tool") {
+      const st = part.state
+      const dur = st?.time?.start !== undefined && st?.time?.end !== undefined ? `${st.time.end - st.time.start} ms` : "?"
+      kv("Status", `${st?.status ?? "?"} · ${dur}`)
+      kv("Tokens", `~${formatK(row.tokens)} · ${view().totalTokens ? `${((row.tokens / view().totalTokens) * 100).toFixed(1)}% of context` : ""}`)
+      block("Payload", JSON.stringify(st?.input ?? {}, null, 1), 8)
+      block("Result", String(st?.output ?? ""), 10)
+      kv("Timing", st?.time?.start ? `started ${new Date(st.time.start).toISOString().slice(11, 23)} · ${dur} · session ts` : "n/a")
+      const cand = resultCands().find((c) => c.partID === (currentPartOf(row) ?? row.partID))
+      kv("Crop", row.isCropped ? "✂ cropped (x to restore)" : cand ? (cand.protections.length ? `protected: ${cand.protections.join(", ")}` : "c then space to stub this result") : "n/a")
+    } else {
+      kv("Tokens", `~${formatK(row.tokens)}`)
+      if (row.durationMs !== undefined) kv("Duration", `${(row.durationMs / 1000).toFixed(1)} s`)
+      block("Text", part?.text ?? row.preview, 14)
+    }
+    return out
+  })
+
+  // ---- consumers -------------------------------------------------------------
+  const consumerRows = createMemo(() => (live() ? consumers(live()!, { cropped: alreadyCropped() }) : []))
+
+  function copySelected() {
+    const row = current()
+    if (!row || row.kind === "branch") return
+    const tr = row.sessionID === sessionID ? live() : others()[row.sessionID]
+    const msg = tr?.messages.find((m) => m.id === row.messageID)
+    const text = row.kind === "step" ? String(msg?.parts.find((p) => p.id === row.partID)?.state?.output ?? msg?.parts.find((p) => p.id === row.partID)?.text ?? "") : (msg?.parts.map((p) => p.text ?? "").join("\n") ?? "")
+    const file = path.join(directory, ".opencode", "context-tree", "last-copy.txt")
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.writeFileSync(file, text)
+      api.ui.toast({ message: `saved ${text.length} chars → .opencode/context-tree/last-copy.txt` })
+    } catch (e) {
+      api.ui.toast({ variant: "error", message: String(e) })
+    }
+  }
 
   function back() {
     if (sessionID) api.route.navigate("session", { sessionID })
@@ -564,8 +681,8 @@ export function TreeRoute(props: TreeRouteProps) {
 
   const off = api.keymap.registerLayer({
     commands: [
-      { name: "ctree.up", hidden: true, run: () => (panel() === "decisions" ? setDecisionIndex((i) => Math.max(0, i - 1)) : setSelected((i) => moveSelection(view().rows, i, -1))) },
-      { name: "ctree.down", hidden: true, run: () => (panel() === "decisions" ? setDecisionIndex((i) => Math.min(Math.max(0, decisions().length - 1), i + 1)) : setSelected((i) => moveSelection(view().rows, i, 1))) },
+      { name: "ctree.up", hidden: true, run: () => (panel() === "decisions" ? setDecisionIndex((i) => Math.max(0, i - 1)) : panel() === "consumers" ? setConsumerIndex((i) => Math.max(0, i - 1)) : setSelected((i) => moveSelection(view().rows, i, -1))) },
+      { name: "ctree.down", hidden: true, run: () => (panel() === "decisions" ? setDecisionIndex((i) => Math.min(Math.max(0, decisions().length - 1), i + 1)) : panel() === "consumers" ? setConsumerIndex((i) => Math.min(Math.max(0, consumerRows().length - 1), i + 1)) : setSelected((i) => moveSelection(view().rows, i, 1))) },
       { name: "ctree.jump_up", hidden: true, run: () => setSelected((i) => moveSelection(view().rows, i, -20)) },
       { name: "ctree.jump_down", hidden: true, run: () => setSelected((i) => moveSelection(view().rows, i, 20)) },
       { name: "ctree.first", hidden: true, run: () => setSelected(0) },
@@ -618,13 +735,19 @@ export function TreeRoute(props: TreeRouteProps) {
       { name: "ctree.auto", hidden: true, enabled: () => Boolean(cropMode()), run: () => autoMarkAll() },
       { name: "ctree.undo", hidden: true, run: () => void undo() },
       { name: "ctree.merge", hidden: true, run: () => void merge() },
+      { name: "ctree.inspector", hidden: true, run: () => { setInspector(!inspector()); api.kv.set("ctree.inspector", inspector()) } },
+      { name: "ctree.consumers", hidden: true, run: () => setPanel(panel() === "consumers" ? "tree" : "consumers") },
+      { name: "ctree.copy", hidden: true, run: () => copySelected() },
+      { name: "ctree.mode_duration", hidden: true, run: () => { setLaneMode("duration"); api.kv.set("ctree.lanes", "duration") } },
+      { name: "ctree.mode_turns", hidden: true, run: () => { setLaneMode("turns"); api.kv.set("ctree.lanes", "turns") } },
+      { name: "ctree.mode_calls", hidden: true, run: () => { setLaneMode("calls"); api.kv.set("ctree.lanes", "calls") } },
       { name: "ctree.decisions", hidden: true, run: () => setPanel(panel() === "decisions" ? "tree" : "decisions") },
       { name: "ctree.export", hidden: true, enabled: () => panel() === "decisions", run: () => exportDecisionsFile() },
       {
         name: "ctree.back",
         hidden: true,
         run: () => {
-          if (panel() === "decisions") {
+          if (panel() !== "tree") {
             setPanel("tree")
             return
           }
@@ -663,6 +786,12 @@ export function TreeRoute(props: TreeRouteProps) {
       { key: "a", cmd: "ctree.auto" },
       { key: "x", cmd: "ctree.undo" },
       { key: "m", cmd: "ctree.merge" },
+      { key: "i", cmd: "ctree.inspector" },
+      { key: "u", cmd: "ctree.consumers" },
+      { key: "y", cmd: "ctree.copy" },
+      { key: "1", cmd: "ctree.mode_duration" },
+      { key: "2", cmd: "ctree.mode_turns" },
+      { key: "3", cmd: "ctree.mode_calls" },
       { key: "shift+d", cmd: "ctree.decisions" },
       { key: "shift+e", cmd: "ctree.export" },
       { key: "shift+l", cmd: "ctree.label" },
@@ -686,6 +815,11 @@ export function TreeRoute(props: TreeRouteProps) {
       <text fg={t.primary}>
         ┌ Context tree · {title()}   {headerRight()}
       </text>
+      <Show when={showLanes()}>
+        <text fg={t.info}>│ Input  {laneLine(laneSeries().input)}   {laneMode() === "duration" ? "[1] Duration" : " 1  duration"} · {laneMode() === "turns" ? "[2] Turns" : " 2  turns"} · {laneMode() === "calls" ? "[3] Calls" : " 3  calls"}</text>
+        <text fg={t.accent}>│ Model  {laneLine(laneSeries().output)}</text>
+        <text fg={t.warning}>│ Tools  {laneLine(laneSeries().tool)}   {lanes().columns.length} col · i inspector · u consumers</text>
+      </Show>
       <text fg={cropMode() ? t.warning : t.textMuted}>
         │ {cropMode() ? `✂ crop mode (${cropMode()}) · space mark · a auto · t result⇄turn · ⏎ apply · esc leave · marked ${selectedCandidates().length} ~${formatK(reclaimed(selectedCandidates()))}` : `filter: ${filter()}`}
         {search() ? `   search: "${search()}"` : ""}
@@ -711,9 +845,24 @@ export function TreeRoute(props: TreeRouteProps) {
           }}
         </For>
       </Show>
+      <Show when={panel() === "consumers"}>
+        <text fg={t.accent}>│ what is filling the context · {formatK(view().totalTokens)} total · c crop · u/esc back</text>
+        <For each={consumerRows()}>
+          {(c, i) => {
+            const sel = () => i() === consumerIndex()
+            return (
+              <text fg={sel() ? t.selectedListItemText : c.kind === "tool" ? t.warning : t.text} bg={sel() ? t.backgroundElement : undefined}>
+                {sel() ? "›" : "│"} {c.source.padEnd(22).slice(0, 22)} {`${(c.share * 100).toFixed(0)}%`.padStart(4)} {bar(c.share, 24)} {formatK(c.tokens).padStart(6)} · {c.count} entr{c.count === 1 ? "y" : "ies"}
+              </text>
+            )
+          }}
+        </For>
+      </Show>
       <Show when={panel() === "tree" && view().rows.length === 0}>
         <text fg={t.textMuted}>│ (no messages yet — chat first, then open the tree)</text>
       </Show>
+      <box flexDirection="row" flexGrow={1}>
+      <box flexDirection="column" flexGrow={1}>
       <For each={panel() === "tree" ? visible() : []}>
         {(row, i) => {
           const isSel = () => windowStart() + i() === selected()
@@ -730,13 +879,20 @@ export function TreeRoute(props: TreeRouteProps) {
           return (
             <text fg={isSel() ? t.selectedListItemText : (color() as never)} bg={isSel() ? t.backgroundElement : undefined}>
               {isSel() ? "›" : "│"} {mark()}
-              {rowLine(row, width() - (cropMode() ? 4 : 0))}
+              {rowLine(row, (showInspector() ? width() - inspectorWidth() - 2 : width()) - (cropMode() ? 4 : 0))}
             </text>
           )
         }}
       </For>
+      </box>
+      <Show when={showInspector()}>
+        <box flexDirection="column" width={inspectorWidth()} paddingLeft={1}>
+          <For each={inspectorLines()}>{(l) => <text fg={l.fg as never}>┃ {l.text}</text>}</For>
+        </box>
+      </Show>
+      </box>
       <text fg={t.textMuted}>
-        └ ⏎ go  b branch  m merge  c crop  x undo  D decisions  L label  ←→ fold  [ ] branches  f filter  / search  q back
+        └ ⏎ go  b branch  m merge  c crop  x undo  i inspect  u consumers  D decisions  L label  y copy  1/2/3 lanes  f filter  / search  q
       </text>
     </box>
   )

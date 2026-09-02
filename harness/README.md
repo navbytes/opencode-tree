@@ -18,7 +18,7 @@ cd project && SPIKE_LOG=../spike-plugin.log EDITOR=../fake-editor.sh python3 ../
 - `project/.opencode/plugins/spike.ts` — server spike (crop stub in `experimental.chat.messages.transform`, model override in `chat.message`).
 - `project/.opencode/plugins/spike-tui.ts` — TUI spike without JSX (`/spikestate`, `/spikeedit` editor gate).
 - `project/.opencode/plugins/spike-route.tsx` + `build.ts` — JSX route spike; build with `bun run build.ts` after `bun add @opencode-ai/plugin@1.18.26 solid-js @opentui/core @opentui/solid @opentui/keymap`, then list `./plugins/spike-route.js` in `tui.json`.
-- `pty-run.py` — minimal pty driver (`--keys "<seconds>:<text>"`, `\r` Enter, `\x03` ctrl+c, `\x1b` Esc); writes raw and ANSI-stripped captures.
+- `pty-run.py` — pty driver: `--keys "<seconds>:<text>"` (timed) or `--keys "@<regex>+<seconds>:<text>"` (wait for text on screen), `\r` Enter, `\x03` ctrl+c, `\x1b` Esc; `--exit-when-done`. Writes the raw capture, an ANSI-stripped dump, and — when `pyte` is installed (`pip install pyte`) — `<out>.screens.txt` with the fully composed screen before every key and at the end. Screen dumps are the reliable thing to assert on; the stripped stream is diff-based and misses redraws.
 
 ## Bun e2e (`bun run test:e2e`)
 

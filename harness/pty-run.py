@@ -27,15 +27,26 @@ for k in a.keys:
 timed.sort(key=lambda x: x[0])
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[=>]|\x1b\([A-Z]")
 start = time.time(); buf = b""; ki = 0; ci = 0; seen_at = None
+try:
+    import pyte
+    screen = pyte.Screen(a.cols, a.rows); stream = pyte.ByteStream(screen)
+except Exception:
+    screen = None; stream = None
+screens = []
+def snapshot(label):
+    if screen is None: return
+    screens.append((label, "\n".join(line.rstrip() for line in screen.display)))
 while time.time() - start < a.timeout:
     now = time.time() - start
     while ki < len(timed) and now >= timed[ki][0]:
+        snapshot(f"before timed key {ki}: {timed[ki][1]!r}")
         os.write(fd, timed[ki][1]); ki += 1
     if ki >= len(timed) and ci < len(cond):
         pat, delay, text = cond[ci]
         if seen_at is None:
             if pat.search(ANSI.sub(b"", buf[-200000:]).decode("utf8", "replace")): seen_at = time.time()
         elif time.time() - seen_at >= delay:
+            snapshot(f"before conditional key {ci}: {text!r}")
             os.write(fd, text); ci += 1; seen_at = None
     r, _, _ = select.select([fd], [], [], 0.1)
     if r:
@@ -43,12 +54,20 @@ while time.time() - start < a.timeout:
         except OSError: break
         if not d: break
         buf += d
+        if stream is not None:
+            try: stream.feed(d)
+            except Exception: pass
     if ki >= len(timed) and ci >= len(cond) and a.exit_when_done:
         break
 if a.exit_when_done: time.sleep(1.0)
 try: os.kill(pid, signal.SIGTERM)
 except Exception: pass
+snapshot("final")
 open(a.out, "wb").write(buf)
+if screens:
+    with open(a.out + ".screens.txt", "w") as f:
+        for label, text in screens:
+            f.write(f"\n===== {label} =====\n{text}\n")
 # strip ANSI for a readable dump
 import re
 txt = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[=>]|\x1b\([A-Z]", b"", buf).decode("utf8", "replace")
