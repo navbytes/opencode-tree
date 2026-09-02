@@ -232,7 +232,7 @@ cross-session assembly is ever needed for the model — only for the picture.
 | Command | Runs in | Also as | What it does |
 |---|---|---|---|
 | `/tree` (alias `/panel`, `Ctrl+Q`) | TUI | palette "Context tree" | opens the combined tree + trajectory route (§7) |
-| `/branch <name> [model]` | TUI | `/ctree branch …` (server, headless) | label the current point and fork here; optionally switch the branch to a cheaper model |
+| `/branch` (prompts for name, then model picker) | TUI | `/ctree branch <name> [model]` (server, headless) | label the current point and fork here; optionally switch the branch to a cheaper model. TUI slash commands cannot take arguments (M0), hence the dialogs. |
 | `/merge [--pick \| --no-llm \| --discard [note] \| --tournament]` | TUI (needs the editor gate) | `/ctree merge --discard` only, headless | close the nearest open branch containing the current session |
 | `/crop [--top \| --auto [--apply] \| --dry-run \| --min-tokens N \| --older-than N \| --keep glob]` | TUI (interactive) / server (`--auto --apply`, `--top` with confirm) | `/ctree crop …` | stub fat results or drop whole Q&A turns, as a view |
 | `/undo` | TUI | `/ctree undo` | revert the last active mutation (branch / merge / crop) |
