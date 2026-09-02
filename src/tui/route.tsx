@@ -8,11 +8,11 @@ import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from
 import { planJump } from "../core/actions.js"
 import { foldJournal, type TreeState } from "../core/journal.js"
 import { cycleFilter, moveSelection, nextBranchIndex, resolveSelection, toggleExpanded } from "../core/navigation.js"
-import { bandFor } from "../core/tokens.js"
+import { bandFor, contextSizeOf, formatContext, formatK, type MinimalMessage } from "../core/tokens.js"
 import { buildSpineMap, buildTreeView, type Filter, type Row } from "../core/tree.js"
 import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
-import { applyCrop, createNamedBranch, executeJump, executeUndo, mergeBranch, setLabel, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
+import { applyCrop, BRANCH_DIALOG, createNamedBranch, executeJump, executeUndo, mergeBranch, mergeDialogOptions, mergeDialogTitle, MERGE_TRUST, setLabel, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
 import { exportDecisions } from "../core/decision.js"
 import { buildLanes, columnFor, durationWeighted, fitColumns, sparkline, type LaneMode } from "../core/lanes.js"
 import { bar, consumers } from "../core/consumers.js"
@@ -38,12 +38,6 @@ export type TreeRouteProps = {
 
 const BAND_KEY = { low: "success", healthy: "success", filling: "warning", red: "error" } as const
 
-export function formatK(tokens: number): string {
-  if (tokens < 1000) return String(tokens)
-  const k = (tokens / 1000).toFixed(1)
-  return `${k.endsWith(".0") ? k.slice(0, -2) : k}k`
-}
-
 function statusColor(t: TuiPluginApi["theme"]["current"], status: Row & { kind: "branch" }): unknown {
   switch (status.status) {
     case "open":
@@ -58,37 +52,55 @@ function statusColor(t: TuiPluginApi["theme"]["current"], status: Row & { kind: 
   }
 }
 
+/** Row previews come from message text: markdown emphasis is noise at one line. */
+function plain(text: string): string {
+  return text.replace(/\*\*|`/g, "")
+}
+
+function fitRow(body: string, tokens: string, width: number): string {
+  const room = Math.max(10, width - tokens.length - 2)
+  const clipped = body.length > room ? `${body.slice(0, room - 1)}…` : body.padEnd(room)
+  return `${clipped} ${tokens}`
+}
+
 function rowLine(row: Row, width: number): string {
-  const tokens = `${formatK(row.tokens)}${row.kind !== "branch" && row.estimated ? "~" : ""}`
+  const tokens = `${row.kind !== "branch" && row.estimated ? "~" : ""}${formatK(row.tokens)}`
   let body: string
   switch (row.kind) {
     case "turn": {
       const marker = `T${row.turn}`.padEnd(3)
       const label = row.label ? ` [${row.label}]` : ""
       const glyph = row.isDecision ? "◆" : row.isSummary ? "◇" : row.glyph
-      body = `${marker} ${row.gutter}${glyph} ${row.isDecision ? "decision " : row.isSummary ? "summary  " : "user     "} ${row.preview}${label}`
+      body = `${marker} ${row.gutter}${glyph} ${row.isDecision ? "decision " : row.isSummary ? "summary  " : "user     "} ${plain(row.preview)}${label}`
       break
     }
     case "step": {
       const flags = `${row.label ? ` [${row.label}]` : ""}${row.isCropped ? " ✂" : ""}${row.warn ? " ⚠" : ""}${row.isError ? " ✗" : ""}`
       const dur = row.durationMs !== undefined ? ` ${(row.durationMs / 1000).toFixed(row.durationMs < 10_000 ? 1 : 0)}s` : ""
-      body = `    ${row.gutter}${row.glyph} ${row.glyph === "⚙" ? "tool     " : row.glyph === "◇" ? "compact  " : "assistant"} ${row.preview}${flags}${dur}`
+      body = `    ${row.gutter}${row.glyph} ${row.glyph === "⚙" ? "tool     " : row.glyph === "◇" ? "compact  " : "assistant"} ${plain(row.preview)}${flags}${dur}`
       break
     }
     case "branch": {
       const model = row.model ? ` · ${row.model.split("/").pop()}` : ""
       const fold = row.expanded ? "▾" : "▸"
       const turns = `${row.turns} turn${row.turns === 1 ? "" : "s"}`
+      const here = row.isCurrent ? "  ← here" : ""
       // an ancestor's tail is the trunk carrying on, not a branch of it: no name or status
       body = row.ancestor
         ? `    ${row.gutter} trunk continues  ${fold} ${turns}`
-        : `    ${row.gutter} ${row.name}  ${fold} ${row.status} · ${turns}${model}${row.isCurrent ? "  ← here" : ""}`
+        : row.turns === 0
+          ? // nothing to expand yet: a ▸ caret here reads as a broken/empty branch
+            `    ${row.gutter} ${row.name}  ${row.status} · just branched, nothing here yet${here}`
+          : `    ${row.gutter} ${row.name}  ${fold} ${row.status} · ${turns}${model}${here}`
       break
     }
   }
-  const room = Math.max(10, width - tokens.length - 2)
-  const clipped = body.length > room ? `${body.slice(0, room - 1)}…` : body.padEnd(room)
-  return `${clipped} ${tokens}`
+  return fitRow(body, tokens, width)
+}
+
+/** Column header over the rows, aligned with `rowLine`'s right-hand token column. */
+function columnHeader(width: number): string {
+  return fitRow("turn  step", "tokens", width)
 }
 
 const DEFAULT_KEYS: Record<string, string[]> = {
@@ -122,8 +134,30 @@ const DEFAULT_KEYS: Record<string, string[]> = {
   label: ["shift+l"],
   filter: ["f"],
   search: ["/"],
+  // terminals disagree on whether "?" carries the shift flag, so bind both spellings
+  help: ["?", "shift+/"],
   back: ["q", "escape"],
 }
+
+const NO_BRANCHES = "No branches yet · b forks here into a real OpenCode session; nothing is copied or deleted."
+
+/** The `?` overlay: unindented lines are headings, indented ones body (see the render). */
+const HELP = [
+  "? help · ? or esc closes",
+  "Reading the screen",
+  "  rows are the active path, oldest first; T<n> counts turns along it",
+  "  trunk = the session you started · ⎇ = a branch: a real, separate OpenCode session",
+  "  ⎇ rows hang off the message they were forked from; ← here is the one you are in",
+  "  ┆⎇ rows are elsewhere in the tree: siblings, or the trunk past your fork point",
+  "  ▾ expanded / ▸ folded — → and ← (or e) open and close a branch inline",
+  "  the right-hand column is tokens; ~ means estimated (chars/4)",
+  "  ⚠ ≥10k tokens · ✂ cropped · ◆ decision record · ◇ summary · ✗ tool error",
+  "Keys",
+  "  move   ↑↓ j k · J K by 20 · g G first/last · [ ] branch rows · → ← e fold",
+  "  act    ⏎ go here · b branch · m merge · c crop · x undo · L label · y copy",
+  "         in crop mode: space mark · a auto · t result⇄turn · ⏎ apply · esc leave",
+  "  views  i inspector · u consumers · D decisions · E export · 1 2 3 lanes · f filter · / search · q back",
+]
 
 /** Plugin option `keybinds: { <command>: "k,up" | [..] | "none" }` overrides DEFAULT_KEYS. */
 function bindingsFor(overrides: Record<string, string[]> | undefined) {
@@ -148,7 +182,7 @@ export function TreeRoute(props: TreeRouteProps) {
   const [others, setOthers] = createSignal<Record<string, Transcript>>({})
   const [busy, setBusy] = createSignal<string | undefined>()
   const [cropMode, setCropMode] = createSignal<"result" | "turn" | undefined>()
-  const [panel, setPanel] = createSignal<"tree" | "decisions" | "consumers">(props.initialView ?? "tree")
+  const [panel, setPanel] = createSignal<"tree" | "decisions" | "consumers" | "help">(props.initialView ?? "tree")
   const [laneMode, setLaneMode] = createSignal<LaneMode>(api.kv.get<LaneMode>("ctree.lanes", "turns"))
   const [inspector, setInspector] = createSignal<boolean>(api.kv.get<boolean>("ctree.inspector", true))
   const [consumerIndex, setConsumerIndex] = createSignal(0)
@@ -241,7 +275,8 @@ export function TreeRoute(props: TreeRouteProps) {
   api.renderer.on("resize", onResize)
   onCleanup(() => void api.renderer.off("resize", onResize))
   const cols = () => size().cols
-  const height = () => Math.max(8, size().rows - 7 - (size().rows >= 12 ? 3 : 0))
+  // chrome above/below the rows: padding, header, lanes, status, column header, footer
+  const height = () => Math.max(8, size().rows - 8 - (size().rows >= 12 ? 3 : 0))
   const width = () => Math.max(60, cols() - 4)
   const windowStart = createMemo(() => {
     const h = height()
@@ -338,7 +373,7 @@ export function TreeRoute(props: TreeRouteProps) {
       return
     }
     const total = plans.reduce((s, p) => s + p.targets.reduce((x, t) => x + t.estTokens, 0), 0)
-    const ok = await confirm(`Crop ${n} ${result ? "result" : "turn"}${n === 1 ? "" : "s"}?`, `~${formatK(total)} tokens leave the model's context on the next turn. The transcript keeps the originals; /undo restores.`)
+    const ok = await confirm(`Crop ${n} ${result ? "result" : "turn"}${n === 1 ? "" : "s"}?`, `~${formatK(total)} tokens leave the model's context on the next turn. Your transcript is never rewritten; the model just stops seeing these. /undo restores.`)
     if (!ok) return
     await guarded("crop", async () => {
       for (const plan of plans) await applyCrop(ctx, plan, { hard: result && Boolean(props.options.hardCrop) })
@@ -365,8 +400,11 @@ export function TreeRoute(props: TreeRouteProps) {
     })
   }
 
-  const band = () => bandFor(view().totalTokens)
+  // the same figure the prompt gauge shows: context of the session, not of the drawn rows
+  const contextSize = createMemo(() => contextSizeOf((live()?.messages ?? []).map((m): MinimalMessage => ({ info: m.role === "assistant" ? { role: "assistant", tokens: m.tokens } : { role: "user" }, parts: m.parts }))))
+  const band = () => bandFor(contextSize().tokens)
   const branchOfCurrent = () => (sessionID ? state().sessions[sessionID] : undefined)
+  const userTurns = () => (live()?.messages ?? []).filter((m) => m.role === "user").length
 
   // ---- lanes (minimap) -----------------------------------------------------
   const lanes = createMemo(() => (live() ? buildLanes(live()!, laneMode() === "duration" ? "turns" : laneMode()) : { mode: laneMode(), columns: [] }))
@@ -411,13 +449,18 @@ export function TreeRoute(props: TreeRouteProps) {
   })
   // the Input lane is scaled against the context window, so a two-message session stays small
   const contextLimit = createMemo(() => (sessionID ? modelContextLimit(api, sessionID) : undefined))
-  const showLanes = () => height() >= 12 && panel() === "tree"
+  // under three turns every bar is either full or empty, which reads as "context full"
+  const laneRoom = () => height() >= 12 && panel() === "tree"
+  const showLanes = () => laneRoom() && userTurns() >= 3
   /** DESIGN.md §7.6: below 80 columns the minimap is the Input sparkline alone. */
   const showAllLanes = () => cols() >= 80
 
   // ---- inspector -----------------------------------------------------------
   const showInspector = () => inspector() && panel() === "tree" && cols() >= 110
   const inspectorWidth = () => Math.min(56, Math.max(36, Math.floor(width() * 0.4)))
+  const rowWidth = () => (showInspector() ? width() - inspectorWidth() - 2 : width()) - (cropMode() ? 4 : 0)
+  // wraps badly next to the inspector, so break it at the ";" rather than mid-clause
+  const noBranchesLines = () => (NO_BRANCHES.length + 2 <= rowWidth() ? [NO_BRANCHES] : NO_BRANCHES.split(/(?<=;) /))
   const inspectorLines = createMemo((): { fg: unknown; text: string }[] => {
     const row = current()
     if (!row) return []
@@ -641,13 +684,13 @@ export function TreeRoute(props: TreeRouteProps) {
 
   async function branch() {
     if (!sessionID) return
-    const name = await prompt("Branch name", "fix-flaky-test")
+    const name = await prompt(BRANCH_DIALOG.title, BRANCH_DIALOG.placeholder)
     if (!name) return
     const model = await new Promise<string | undefined>((resolve) => {
       api.ui.dialog.replace(
         () =>
           api.ui.DialogSelect({
-            title: `Model for ⎇ ${name}`,
+            title: BRANCH_DIALOG.modelTitle,
             options: [
               { title: "Keep the current model", value: "" },
               { title: "Other… (provider/model)", value: "other" },
@@ -736,18 +779,14 @@ export function TreeRoute(props: TreeRouteProps) {
       api.ui.toast({ message: "not on an open branch — /branch first, or open the tree from a branch" })
       return
     }
-    const mode = await select<MergeMode>(`Merge ⎇ ${b.name ?? "branch"} into its parent`, [
-      { title: "Squash", value: "squash", description: hasEditor() ? "model drafts a ◆ decision record → your $EDITOR → confirm by saving" : "model drafts a ◆ decision record → accept in-app (no $EDITOR set)" },
-      { title: "Squash without LLM", value: "squash-no-llm", description: "empty template → your editor" },
-      { title: "Discard", value: "discard", description: "back to the parent; branch marked rejected; nothing written" },
-      { title: "Tournament", value: "tournament", description: "this branch wins; open siblings get epitaphs and are closed" },
-    ])
+    const siblings = Object.values(state().sessions).filter((x) => x.parentSessionID === b.parentSessionID && x.sessionID !== sessionID && x.status === "open").length
+    const mode = await select<MergeMode>(mergeDialogTitle(b.name ?? "branch", others()[b.parentSessionID]?.title), mergeDialogOptions({ siblings }))
     if (!mode) return
     let note: string | undefined
     if (mode === "discard") note = (await prompt("Why? (optional note on the close marker)", "dead end")) ?? undefined
     const inApp = !hasEditor()
       ? async (draft: string) => {
-          const ok = await confirm("Accept the drafted record as-is?", `${draft.slice(0, 400)}${draft.length > 400 ? "…" : ""}\n\n(set $EDITOR to review it in your editor)`)
+          const ok = await confirm("Accept the drafted record as-is?", `${draft.slice(0, 400)}${draft.length > 400 ? "…" : ""}\n\n${MERGE_TRUST}\n\n(set $EDITOR to review it in your editor)`)
           return ok ? draft : undefined
         }
       : undefined
@@ -848,6 +887,7 @@ export function TreeRoute(props: TreeRouteProps) {
       { name: "ctree.mode_calls", hidden: true, run: () => { setLaneMode("calls"); api.kv.set("ctree.lanes", "calls") } },
       { name: "ctree.decisions", hidden: true, run: () => setPanel(panel() === "decisions" ? "tree" : "decisions") },
       { name: "ctree.export", hidden: true, enabled: () => panel() === "decisions", run: () => exportDecisionsFile() },
+      { name: "ctree.help", hidden: true, run: () => setPanel(panel() === "help" ? "tree" : "help") },
       {
         name: "ctree.back",
         hidden: true,
@@ -869,18 +909,25 @@ export function TreeRoute(props: TreeRouteProps) {
   })
   onCleanup(() => off())
 
-  const title = () => (sessionID ? (api.state.session.get(sessionID)?.title ?? sessionID) : "no session")
-  const headerRight = () => {
+  const sessionTitle = () => (sessionID ? (api.state.session.get(sessionID)?.title ?? sessionID) : "no session")
+  /** The tree is titled by its trunk: a branch's own session title is just `⎇ <name>`. */
+  const title = () => {
+    const root = state().root
+    return (root && root !== sessionID ? others()[root]?.title : undefined) ?? sessionTitle()
+  }
+  const where = () => {
     const b = branchOfCurrent()
-    const where = b ? `(${b.status}${b.model ? ` · ${b.model.split("/").pop()}` : ""})` : "trunk"
-    return `${where}   ctx ${view().totalEstimated ? "~" : ""}${formatK(view().totalTokens)} · ${band()}`
+    if (!b) return "trunk"
+    return `⎇ ${b.name ?? sessionTitle()} (${b.status}${b.model ? ` · ${b.model.split("/").pop()}` : ""})`
   }
 
   return (
     <box flexDirection="column" padding={1} backgroundColor={t.background} width="100%" height="100%">
-      <text fg={t.primary}>
-        ┌ Context tree · {title()}   {headerRight()}
-      </text>
+      <box flexDirection="row">
+        {/* one expression: JSX would trim the gap before the context string */}
+        <text fg={t.primary}>{`┌ Context tree · ${title()} · ${where()}   `}</text>
+        <text fg={t[BAND_KEY[band()]]}>{formatContext(contextSize(), contextLimit())}</text>
+      </box>
       <Show when={showLanes()}>
         <text fg={t.info}>│ Input  {laneLine(laneSeries().input, contextLimit())}   {laneMode() === "duration" ? "[1] Duration" : " 1  duration"} · {laneMode() === "turns" ? "[2] Turns" : " 2  turns"} · {laneMode() === "calls" ? "[3] Calls" : " 3  calls"}</text>
         <Show when={showAllLanes()}>
@@ -888,9 +935,12 @@ export function TreeRoute(props: TreeRouteProps) {
           <box flexDirection="row">
             <text fg={t.warning}>│ Tools  </text>
             <For each={toolRuns()}>{(run) => <text fg={run.error ? t.error : t.warning}>{run.text}</text>}</For>
-            <text fg={t.warning}>   {lanes().columns.length} col · i inspector · u consumers</text>
+            <text fg={t.warning}>   i inspector · u consumers</text>
           </box>
         </Show>
+      </Show>
+      <Show when={laneRoom() && !showLanes()}>
+        <text fg={t.textMuted}>│ lanes appear after 3 turns</text>
       </Show>
       <text fg={cropMode() ? t.warning : t.textMuted}>
         │ {cropMode() ? `✂ crop mode (${cropMode()}) · space mark · a auto · t result⇄turn · ⏎ apply · esc leave · marked ${selectedCandidates().length} ~${formatK(reclaimed(selectedCandidates()))}` : `filter: ${filter()}`}
@@ -908,7 +958,7 @@ export function TreeRoute(props: TreeRouteProps) {
             const lines = () => (d.text ?? "").split("\n").slice(0, sel() ? 12 : 1)
             return (
               <box flexDirection="column">
-                <text fg={sel() ? t.selectedListItemText : t.accent} bg={sel() ? t.backgroundElement : undefined}>
+                <text fg={sel() ? t.background : t.accent} bg={sel() ? t.primary : undefined}>
                   {sel() ? "›" : "│"} {d.hidden ? "◇ (hidden from model) " : "◆ "}{d.branchName}  · {new Date(d.recordedAt).toISOString().slice(0, 16).replace("T", " ")}{d.siblings.length ? ` · ✗ ${d.siblings.map((x) => x.name).join(", ")}` : ""}
                 </text>
                 <For each={sel() ? lines().slice(1) : []}>{(l) => <text fg={t.text}>│    {l.slice(0, width() - 6)}</text>}</For>
@@ -918,20 +968,25 @@ export function TreeRoute(props: TreeRouteProps) {
         </For>
       </Show>
       <Show when={panel() === "consumers"}>
-        <text fg={t.accent}>│ what is filling the context · {formatK(view().totalTokens)} total · c crop · u/esc back</text>
+        <text fg={t.accent}>│ what's filling the context · {formatK(view().totalTokens)} total · c crop · u/esc back</text>
         <For each={consumerRows()}>
           {(c, i) => {
             const sel = () => i() === consumerIndex()
             return (
-              <text fg={sel() ? t.selectedListItemText : c.kind === "tool" ? t.warning : t.text} bg={sel() ? t.backgroundElement : undefined}>
+              <text fg={sel() ? t.background : c.kind === "tool" ? t.warning : t.text} bg={sel() ? t.primary : undefined}>
                 {sel() ? "›" : "│"} {c.source.padEnd(22).slice(0, 22)} {`${(c.share * 100).toFixed(0)}%`.padStart(4)} {bar(c.share, 24)} {formatK(c.tokens).padStart(6)} · {c.count} entr{c.count === 1 ? "y" : "ies"}
               </text>
             )
           }}
         </For>
       </Show>
+      {/* clipped to the terminal so a short window keeps its footer */}
+      <For each={panel() === "help" ? HELP.slice(0, Math.max(6, size().rows - 5)) : []}>{(l) => <text fg={l.startsWith(" ") ? t.textMuted : t.accent}>│ {l}</text>}</For>
       <Show when={panel() === "tree" && view().rows.length === 0}>
         <text fg={t.textMuted}>│ (no messages yet — chat first, then open the tree)</text>
+      </Show>
+      <Show when={panel() === "tree" && view().rows.length > 0}>
+        <text fg={t.textMuted}>│ {cropMode() ? "    " : ""}{columnHeader(rowWidth())}</text>
       </Show>
       <box flexDirection="row" flexGrow={1}>
       <box flexDirection="column" flexGrow={1}>
@@ -949,12 +1004,15 @@ export function TreeRoute(props: TreeRouteProps) {
             return `${on ? "[x]" : "[ ]"}${prot.length ? "!" : " "}`
           }
           return (
-            <text fg={isSel() ? t.selectedListItemText : (color() as never)} bg={isSel() ? t.backgroundElement : undefined}>
+            <text fg={isSel() ? t.background : (color() as never)} bg={isSel() ? t.primary : undefined}>
               {isSel() ? "›" : "│"} {mark()}
-              {rowLine(row, (showInspector() ? width() - inspectorWidth() - 2 : width()) - (cropMode() ? 4 : 0))}
+              {rowLine(row, rowWidth())}
             </text>
           )
         }}
+      </For>
+      <For each={panel() === "tree" && view().rows.length > 0 && !view().rows.some((r) => r.kind === "branch") ? noBranchesLines() : []}>
+        {(l) => <text fg={t.textMuted}>│ {l}</text>}
       </For>
       </box>
       <Show when={showInspector()}>
@@ -963,8 +1021,8 @@ export function TreeRoute(props: TreeRouteProps) {
         </box>
       </Show>
       </box>
-      <text fg={t.textMuted}>
-        └ ⏎ go  b branch  m merge  c crop  x undo  i inspect  u consumers  D decisions  L label  y copy  1/2/3 lanes  f filter  / search  q
+      <text fg={cropMode() ? t.warning : t.textMuted}>
+        └ {cropMode() ? "space mark  a auto  t result⇄turn  ⏎ apply  esc leave" : "⏎ go  b branch  m merge  c crop  x undo  ? help  q back"}
       </text>
     </box>
   )

@@ -322,6 +322,29 @@ export async function draftWithHelper(ctx: ActionContext, input: { title: string
 
 export type MergeMode = "squash" | "squash-no-llm" | "discard" | "tournament"
 
+/** The promise every merge confirmation repeats — the reason a merge is safe to try. */
+export const MERGE_TRUST = "Your transcript is never rewritten; the record is appended to the trunk as a normal message."
+
+/** What the $EDITOR gate opens with: the draft is a proposal, saving is the confirmation. */
+export const MERGE_GATE_NOTICE = `Edit the ◆ decision record, then save to confirm (empty file or a non-zero exit aborts the merge).\n${MERGE_TRUST}`
+
+/** Shared copy for the merge picker (palette and route). */
+export function mergeDialogTitle(branchName: string, trunkTitle?: string): string {
+  return `Merge ⎇ ${branchName} → ${trunkTitle ? clip(trunkTitle, 28) : "the trunk"}`
+}
+
+/** Tournament only exists when there is something to compare against. Descriptions render on
+ *  the option's own line, which truncates past ~50 columns — keep them short; the full promise
+ *  is repeated at the confirmation step (`MERGE_TRUST`). */
+export function mergeDialogOptions(input: { siblings: number }): { title: string; value: MergeMode; description: string }[] {
+  return [
+    { title: "Squash", value: "squash" as const, description: "drafts a ◆ decision record you confirm" },
+    { title: "Squash without LLM", value: "squash-no-llm" as const, description: "you write the record yourself" },
+    { title: "Discard", value: "discard" as const, description: "rejected; nothing lands in the trunk" },
+    ...(input.siblings > 0 ? [{ title: "Tournament", value: "tournament" as const, description: "compare sibling branches and keep one" }] : []),
+  ]
+}
+
 export type MergeInput = {
   sessionID: string
   mode: MergeMode
@@ -374,7 +397,7 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
   debug("merge.drafted", { chars: draft.length })
 
   // --- gate ----------------------------------------------------------------
-  const confirm = input.confirm ?? ((d: string) => editInExternalEditor(ctx.api.renderer as any, d, ctx.directory))
+  const confirm = input.confirm ?? ((d: string) => editInExternalEditor(ctx.api.renderer as any, d, ctx.directory, MERGE_GATE_NOTICE))
   if (!input.confirm && !hasEditor()) throw new Error("no $EDITOR configured — set VISUAL/EDITOR, or use the in-app confirm")
   const confirmed = await confirm(draft)
   if (!confirmed) {
@@ -413,4 +436,12 @@ async function fetchOwnTranscript(ctx: ActionContext, sessionID: string) {
     parts: (m.parts as any[]).map((p) => ({ id: p.id, type: p.type, text: p.text, tool: p.tool, callID: p.callID, state: p.state, time: p.time, metadata: p.metadata })),
   }))
   return { sessionID, title: sessionID, status: "available" as const, messages }
+}
+
+/** Shared copy for the branch-name dialog (palette and route). */
+export const BRANCH_DIALOG = { title: "Branch here → new OpenCode session", placeholder: "name, e.g. try-redis", modelTitle: "Model for this branch (Enter keeps the current one)" }
+
+/** Truncate to `max` columns with an ellipsis — the sidebar and dialogs are narrow. */
+export function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }

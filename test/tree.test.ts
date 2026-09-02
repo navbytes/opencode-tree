@@ -178,6 +178,40 @@ describe("a fork of a fork", () => {
   })
 })
 
+describe("headless /ctree command turns", () => {
+  const f = buildFixture()
+  const trunk = f.transcripts[TRUNK]!
+  const command = () => [
+    user("cm", "[context tree]\ntree t_fixture\nthis session is the trunk\n\n(Acknowledge in one short line; do not act on this.)"),
+    assistant("ca", { text: "Acknowledged.", input: 3100, output: 4 }),
+  ]
+  const withMessages = (messages: typeof trunk.messages) => ({
+    state: f.state,
+    transcripts: { ...f.transcripts, [TRUNK]: { ...trunk, messages } },
+    currentSessionID: TRUNK,
+    expanded: new Set<string>(),
+  })
+  const midway = withMessages([...trunk.messages, ...command(), user("m4", "keep going"), assistant("a4", { text: "Sure.", input: 3400, output: 6 })])
+
+  test("default hides the command turn and its acknowledgement, and T<n> does not skip", () => {
+    const view = buildTreeView({ ...midway, filter: "default" })
+    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "├⎇try-redis", "╰⎇fix-flaky-test", "T3", "○", "T4", "○"])
+    const t4 = view.rows.find((r) => r.kind === "turn" && r.turn === 4)!
+    expect(t4.kind === "turn" && t4.messageID).toBe("m4")
+    expect(view.rows.some((r) => r.kind !== "branch" && (r.messageID === "cm" || r.messageID === "ca"))).toBe(false)
+  })
+  test("`all` keeps it, so the plumbing stays inspectable", () => {
+    const rows = buildTreeView({ ...midway, filter: "all" }).rows
+    expect(rows.some((r) => r.kind === "turn" && r.messageID === "cm")).toBe(true)
+    expect(rows.some((r) => r.kind === "step" && r.messageID === "ca")).toBe(true)
+  })
+  test("a trailing command turn does not steal isTip from the last real turn", () => {
+    const view = buildTreeView({ ...withMessages([...trunk.messages, ...command()]), filter: "default" })
+    const tips = view.rows.filter((r) => r.kind === "turn" && r.isTip)
+    expect(tips.map((r) => (r.kind === "turn" ? r.messageID : ""))).toEqual(["m3"])
+  })
+})
+
 describe("filters, search, labels, crops", () => {
   const f = buildFixture()
   const base = { state: f.state, transcripts: f.transcripts, currentSessionID: TRUNK, expanded: new Set<string>() }

@@ -3,7 +3,8 @@
 Pi-style context tree for [OpenCode](https://opencode.ai), with the
 [`pi-context-tree`](https://github.com/navbytes/pi-context-tree) git-style workflow
 (`/branch`, `/merge`, `/crop`, `/undo`) and a DeepSeek-Harness-style trajectory view
-(timeline lanes, per-step tokens and timing, inspector) in one screen.
+(timeline lanes, per-step tokens — the model's own where it reports them, estimated `~`
+elsewhere — timing, inspector) in one screen.
 
 **Status: 0.1.0 release candidate — not yet published to npm; install from a checkout (see `docs/USAGE.md`).**
 Branch, jump, labels, filters, search, crop + undo, squash/discard/tournament merge with a
@@ -17,18 +18,18 @@ model, architecture, edge cases, and the roadmap.
 ## The idea in one screen
 
 ```
-┌ Context tree · Fix flaky test  ⎇ fix-flaky-test (open)          ctx 46k/200k ▓▓▓░░ filling ▲+24% (bash) ─┐
+┌ Context tree · Fix flaky test · ⎇ fix-flaky-test (open)                    ctx ~46k/200k · filling ▲+24% (bash) ─┐
 │ Input  ▁▁▂▂▃▃▄▄▅▅▆▆▇▇█        Model ▪ ▪ ▪  ▪ ▪       Tools ▪▪▪ ▪▪ ▪▪▪▪ ▪▪      [1] Duration [2] Turns [3] Calls │
-├──────────────────────────────────────────────────────┬──────────────────────────────────────────────────────┤
+│ turn  step                                    tokens ┬──────────────────────────────────────────────────────┤
 │ T1  ● user      Build yourself a tool that…     1.2k │ ⚙ bash · T1 · step 3                                   │
-│     ⚙ bash      ls -la ~/Documents/  → total…   2.1k │ Status   completed · 21 ms                             │
+│     ⚙ bash      ls -la ~/Documents/  → total…  ~2.1k │ Status   completed · 21 ms                             │
 │ T2  ● user      decompress the session and…     0.2k │ Payload  {"command":"ls -la …"}                        │
-│  ├⎇ try-redis      squashed → ◆ T3 · 9 turns · ~22k  │ Result   total 744 …                                   │
-│  ╰⎇ fix-flaky-test open · 6 turns · ~14k   ← here    │ Tokens   ~2.1k · 4.6% of context                       │
-│  │  ⚙ bash      bun test src/foo.test.ts ⚠     4.7k │ Crop     [c] stub result · [t] drop turn               │
+│  ├⎇ try-redis      ▸ squashed · 9 turns        ~22k  │ Result   total 744 …                                   │
+│  ╰⎇ fix-flaky-test ▾ open · 6 turns   ← here   ~14k  │ Tokens   ~2.1k · 4.6% of context                       │
+│  │  ⚙ bash      bun test src/foo.test.ts ⚠     ~4.7k │ Crop     [c] stub result · [t] drop turn               │
 │ T3  ◆ decision  Decision: try-redis — Outcome…  0.9k │                                                        │
 ├──────────────────────────────────────────────────────┴──────────────────────────────────────────────────────┤
-│ ⏎ go here  b branch  m merge  c crop  x undo  i inspector  u consumers  D decisions  L label  / search  q   │
+│ ⏎ go  b branch  m merge  c crop  x undo  ? help  q back                                                      │
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -38,6 +39,31 @@ Tools timeline; the right pane is its inspector. Branches off the active path (s
 continuation) are listed below as `┆⎇` rows, and sessions made with OpenCode's own `/fork`
 are adopted into the tree automatically.
 
+## Screenshots
+
+Real OpenCode 1.18 TUI, gemma4 via ollama. A trunk with a native `/fork` at turn 1, a squashed
+`try-redis` branch (its ◆ decision record landed in the trunk as T5), a discarded `try-lru`
+branch, and a second native fork:
+
+![tree from the trunk](docs/screenshots/tree-trunk.png)
+
+`→` expands branches inline; their turns continue the trunk's numbering from the fork point:
+
+![tree with branches expanded](docs/screenshots/tree-expanded.png)
+
+From inside a branch, `← here` marks it and the trunk's continuation and siblings appear as `┆⎇` rows:
+
+![tree from a branch](docs/screenshots/tree-from-a-branch.png)
+
+`D` decisions · `u` what's filling the context · `?` help · `m` merge · the sidebar card:
+
+| | |
+|---|---|
+| ![decisions](docs/screenshots/decisions.png) | ![consumers](docs/screenshots/consumers.png) |
+| ![help](docs/screenshots/help.png) | ![merge picker](docs/screenshots/merge-picker.png) |
+
+![sidebar card](docs/screenshots/sidebar-card.png)
+
 ## Try it from source
 
 ```sh
@@ -46,10 +72,11 @@ bun install && bun run build
 # tui.json       →  "plugin": ["/abs/path/opencode-tree/dist/tui.js"]
 ```
 
-Keys inside `/tree`: `⏎` go here · `b` branch · `m` merge · `c` crop mode (`space` mark,
-double for protected, `a` auto, `t` result⇄turn, `⏎` apply) · `x` undo · `D` decisions
-(`E` export) · `L` label · `←→` fold/unfold · `[ ]` hop branches · `f` filter · `/` search ·
-`g/G` · `q`.
+The footer inside `/tree` carries six keys — `⏎` go, `b` branch, `m` merge, `c` crop,
+`x` undo, `q` back — and `?` opens a help overlay with the rest: crop mode (`space` mark,
+double for protected, `a` auto, `t` result⇄turn, `⏎` apply), `i` inspector, `u` consumers,
+`D` decisions (`E` export), `L` label, `←→` fold/unfold, `[ ]` hop branches, `f` filter,
+`/` search, `g/G`, and how to read the screen.
 
 ## Commands
 
@@ -57,7 +84,7 @@ double for protected, `a` auto, `t` result⇄turn, `⏎` apply) · `x` undo · `
 |---|---|
 | `/tree` (`Ctrl+Q`) | open the combined tree + trajectory view |
 | `/branch <name> [model]` | fork here into a named branch, optionally on a cheaper model |
-| `/merge [--pick \| --no-llm \| --discard \| --tournament]` | close the branch; default squashes to a human-confirmed ◆ decision record in the trunk |
+| `/merge [--pick \| --no-llm \| --discard \| --tournament]` | close the branch: **Squash** drafts a ◆ decision record you confirm, **Squash without LLM** lets you write it, **Discard** lands nothing, **Tournament** keeps one of several siblings. Your transcript is never rewritten; the record is appended to the trunk as a normal message |
 | `/crop [--top \| --auto …]` | stub fat tool results or drop whole turns from what the model sees; append-only, reversible |
 | `/undo` | revert the last branch / merge / crop |
 | `/decisions [--export]` | list or export decision records |

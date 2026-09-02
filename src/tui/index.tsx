@@ -4,13 +4,14 @@
  * `/branch`, `/label`, the `ctree` route, and the prompt-side gauge slot.
  */
 import type { TuiPluginApi, TuiPlugin } from "@opencode-ai/plugin/tui"
-import { createEffect, createMemo, createSignal, on } from "solid-js"
-import { bandFor, contextSizeOf, type MinimalMessage, type MinimalPart } from "../core/tokens.js"
+import { Show, createEffect, createMemo, createSignal, on } from "solid-js"
+import { bandFor, contextSizeOf, formatContext, formatK, type MinimalMessage, type MinimalPart } from "../core/tokens.js"
 import { JournalStore, type StorageMode } from "../shared/store.js"
 import { debug } from "../shared/debug.js"
-import { bumpJournal, createNamedBranch, journalRevision, mergeBranch, setLabel, type MergeMode } from "./actions.js"
+import { BRANCH_DIALOG, MERGE_TRUST, bumpJournal, clip, createNamedBranch, journalRevision, mergeBranch, mergeDialogOptions, mergeDialogTitle, setLabel, type MergeMode } from "./actions.js"
+import { openSiblings } from "../core/decision.js"
 import { hasEditor } from "./editor.js"
-import { TreeRoute, formatK } from "./route.js"
+import { TreeRoute } from "./route.js"
 import { parseForkTitle } from "../core/adopt.js"
 import { adoptNativeForks } from "../shared/adopt.js"
 import { fetchTranscript, modelContextLimit } from "./transcripts.js"
@@ -62,8 +63,11 @@ function toMinimalMessages(messages: readonly any[], part: (messageID: string) =
  *  the session's own title (DESIGN.md §4.1's `kind: "native"`). */
 function branchLabel(api: TuiPluginApi, sessionID: string, name: string | undefined, max?: number): string {
   const label = name ?? api.state.session.get(sessionID)?.title ?? "branch"
-  return max !== undefined && label.length > max ? `${label.slice(0, max - 1)}…` : label
+  return max === undefined ? label : clip(label, max)
 }
+
+/** OpenCode's sidebar is narrow; anything longer wraps and orphans the tail of the line. */
+const CARD_COLUMNS = 28
 
 function currentSession(api: TuiPluginApi): string | undefined {
   const cur = api.route.current
@@ -170,7 +174,7 @@ const tui: TuiPlugin = async (api, rawOptions) => {
           const sessionID = currentSession(api)
           if (!sessionID) return
           await new Promise((r) => setTimeout(r, 30))
-          const name = await promptDialog("Branch name", "fix-flaky-test")
+          const name = await promptDialog(BRANCH_DIALOG.title, BRANCH_DIALOG.placeholder)
           debug("branch.named", { name })
           if (!name) return
           try {
@@ -218,8 +222,9 @@ const tui: TuiPlugin = async (api, rawOptions) => {
           const sessionID = currentSession(api)
           if (!sessionID) return
           await new Promise((r) => setTimeout(r, 30))
-          const branch = store.stateForSession(sessionID)?.sessions[sessionID]
-          if (!branch || branch.status !== "open") {
+          const state = store.stateForSession(sessionID)
+          const branch = state?.sessions[sessionID]
+          if (!state || !branch || branch.status !== "open") {
             api.ui.toast({ message: "not on an open branch — /branch first" })
             return
           }
@@ -227,13 +232,8 @@ const tui: TuiPlugin = async (api, rawOptions) => {
             api.ui.dialog.replace(
               () =>
                 api.ui.DialogSelect<MergeMode>({
-                  title: `Merge ⎇ ${branch.name ?? "branch"}`,
-                  options: [
-                    { title: "Squash", value: "squash", description: hasEditor() ? "draft → $EDITOR → save to confirm" : "draft → accept in-app" },
-                    { title: "Squash without LLM", value: "squash-no-llm" },
-                    { title: "Discard", value: "discard" },
-                    { title: "Tournament", value: "tournament" },
-                  ],
+                  title: mergeDialogTitle(branch.name ?? "branch", api.state.session.get(branch.parentSessionID)?.title),
+                  options: mergeDialogOptions({ siblings: openSiblings(state, sessionID).length }),
                   onSelect: (o) => {
                     resolve(o.value)
                     api.ui.dialog.clear()
@@ -250,7 +250,7 @@ const tui: TuiPlugin = async (api, rawOptions) => {
                     () =>
                       api.ui.DialogConfirm({
                         title: "Accept the drafted record as-is?",
-                        message: `${draft.slice(0, 400)}${draft.length > 400 ? "…" : ""}`,
+                        message: `${draft.slice(0, 400)}${draft.length > 400 ? "…" : ""}\n\n${MERGE_TRUST}`,
                         onConfirm: () => {
                           resolve(draft)
                           api.ui.dialog.clear()
@@ -317,11 +317,26 @@ const tui: TuiPlugin = async (api, rawOptions) => {
         const crops = () => st()?.activeCrops(props.session_id) ?? []
         const hidden = () => crops().reduce((s, c) => s + c.targets.reduce((x, y) => x + y.estTokens, 0), 0)
         const siblings = () => Object.values(st()?.sessions ?? {}).filter((b) => b.parentSessionID === props.session_id && b.status === "open").length
+        // status and parent go on their own line: a branch name long enough to wrap used to
+        // leave "· open" orphaned underneath it
+        const status = () => {
+          const b = branch()!
+          const title = api.state.session.get(b.parentSessionID)?.title
+          const room = CARD_COLUMNS - b.status.length - 10
+          return `${b.status}${title && room > 3 ? ` · from "${clip(title, room)}"` : ""}`
+        }
         return (
           <box flexDirection="column">
-            <text fg={t.textMuted}>Context tree</text>
-            <text fg={branch() ? t.success : t.text}>{branch() ? `⎇ ${branchLabel(api, props.session_id, branch()!.name)} · ${branch()!.status}` : `trunk${siblings() ? ` · ${siblings()} open branch${siblings() === 1 ? "" : "es"}` : ""}`}</text>
-            <text fg={crops().length ? t.warning : t.textMuted}>{crops().length ? `✂ ${crops().length} crop${crops().length === 1 ? "" : "s"} · ~${formatK(hidden())} hidden from model` : "no crops"}</text>
+            <text fg={t.text}>
+              <b>Context tree</b>
+            </text>
+            <Show when={branch()} fallback={<text fg={t.text}>{`trunk${siblings() ? ` · ${siblings()} branch${siblings() === 1 ? "" : "es"}` : ""}`}</text>}>
+              <text fg={t.success}>{`⎇ ${branchLabel(api, props.session_id, branch()!.name, CARD_COLUMNS - 2)}`}</text>
+              <text fg={t.textMuted}>{status()}</text>
+            </Show>
+            <Show when={crops().length}>
+              <text fg={t.warning}>{`✂ ${crops().length} crop${crops().length === 1 ? "" : "s"} · ~${formatK(hidden())} hidden`}</text>
+            </Show>
             <text fg={t.textMuted}>/tree · ctrl+q</text>
           </box>
         )
@@ -395,9 +410,8 @@ const tui: TuiPlugin = async (api, rawOptions) => {
           } else if (lim && size().tokens < lim - reserve() * 2) guardNudged = false
         })
         return (
-          <text fg={t[BAND_COLOR[band()]]}>
-            {branch() ? `⎇ ${branchLabel(api, props.session_id, branch()!.name, 24)} · ` : ""}ctx {formatK(size().tokens)}{limit() ? `/${formatK(limit()!)}` : ""} · {band()}{trend()}
-          </text>
+          // the same string the tree header shows, so both surfaces read identically
+          <text fg={t[BAND_COLOR[band()]]}>{`${branch() ? `⎇ ${branchLabel(api, props.session_id, branch()!.name, 24)} · ` : ""}${formatContext(size(), limit())}${trend()}`}</text>
         )
       },
     },

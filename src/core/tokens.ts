@@ -91,3 +91,15 @@ export function bandFor(tokens: number): ContextBand {
   if (tokens < 64_000) return "filling"
   return "red"
 }
+
+/** `12345` → `12.3k`, `800` → `800`. */
+export function formatK(tokens: number): string {
+  if (tokens < 1000) return String(tokens)
+  const k = (tokens / 1000).toFixed(1)
+  return `${k.endsWith(".0") ? k.slice(0, -2) : k}k`
+}
+
+/** The one context string every surface shows: `ctx ~2.3k/32.8k · low` (`~` when estimated). */
+export function formatContext(size: { tokens: number; estimated: boolean }, limit?: number): string {
+  return `ctx ${size.estimated ? "~" : ""}${formatK(size.tokens)}${limit ? `/${formatK(limit)}` : ""} · ${bandFor(size.tokens)}`
+}

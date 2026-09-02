@@ -27,12 +27,13 @@ OpenCode storage — off by default); `keybinds` overrides any route key by comm
 e.g. `{ "keybinds": { "open": "ctrl+t", "up": "k,up", "copy": "none" } }` — names are
 `open up down jump_up jump_down first last prev_branch next_branch fold unfold toggle go
 branch label filter search back crop crop_toggle_mode mark auto undo merge inspector
-consumers copy mode_duration mode_turns mode_calls decisions export`.
+consumers copy mode_duration mode_turns mode_calls decisions export help`.
 
 ## The loop
 
 ```
-/branch            name it → (model picker) → you are on ⎇ name, a real OpenCode session
+/branch            name it → you are on ⎇ name, a real OpenCode session (b in the tree
+                   also asks "Model for this branch", Enter keeps the current one)
 …side quest…
 /merge             Squash → the branch model drafts a ◆ decision record → your $EDITOR →
                    save to confirm → the record lands in the trunk as one message; the
@@ -43,6 +44,18 @@ c … space … ⏎      crop a fat tool result (double space for protected ones
 x                  undo the last crop / branch / merge on this path
 ```
 
+`/merge` asks how to close the branch:
+
+| option | what it does |
+|---|---|
+| **Squash** | drafts a ◆ decision record you confirm — one model call, then your `$EDITOR` (or an in-app confirm when none is set); it lands in the trunk as one message |
+| **Squash without LLM** | you write the record yourself, from the empty template |
+| **Discard** | rejected; nothing lands in the trunk |
+| **Tournament** | compare sibling branches and keep one — only offered when the branch has open siblings |
+
+Every confirmation repeats the promise: *your transcript is never rewritten; the record is
+appended to the trunk as a normal message.*
+
 ## `/tree` keys
 
 | key | action |
@@ -51,8 +64,8 @@ x                  undo the last crop / branch / merge on this path
 | `[` `]` | previous / next branch row |
 | `← →` `h l` `e` | fold / unfold a branch inline |
 | `⏎` | go here: switch to a branch tip, or fork (a user turn = redo with the text pre-filled; a step = continue from there). Asks "Summarize the branch you are leaving?" (Pi) |
-| `b` | branch here (name, then model) |
-| `m` | merge: Squash / Squash without LLM / Discard / Tournament |
+| `b` | branch here: name it, then "Model for this branch" (Enter keeps the current one) |
+| `m` | merge: Squash / Squash without LLM / Discard / Tournament (siblings only) |
 | `c` `space` `a` `t` `⏎` | crop mode: mark, auto-mark (≥10k tokens, older than 2 turns), result⇄turn, apply |
 | `x` | undo |
 | `D` `E` | decisions panel, export `ctree-decisions.md` |
@@ -62,7 +75,11 @@ x                  undo the last crop / branch / merge on this path
 | `L` | label the selected message |
 | `f` `/` | filter cycle (default → no-tools → user-only → labeled → all), search |
 | `y` | save the selected text to `.opencode/context-tree/last-copy.txt` |
+| `?` | help overlay: how to read the screen + every key (`?` or `esc` closes) |
 | `q` `esc` | back (esc leaves crop mode / panels first) |
+
+The footer only lists the six you need — `⏎ go  b branch  m merge  c crop  x undo  ? help
+q back`; the rest live behind `?`.
 
 Palette: **Context tree**, **Branch here**, **Merge branch**, **Decisions**, **Label this point**.
 `ctrl+q` opens the tree.
@@ -70,18 +87,23 @@ Palette: **Context tree**, **Branch here**, **Merge branch**, **Decisions**, **L
 ## Reading the screen
 
 ```
-┌ Context tree · Fix flaky test   ⎇ fix-flaky (open · haiku)   ctx 46k/200k · filling ▲+24% (bash)
+┌ Context tree · Fix flaky test · ⎇ fix-flaky (open · haiku)   ctx ~46k/200k · filling
 │ Input  ▁▂▃▄▅▆▇█▮…      Model ▪▪▪…      Tools ▪▪▪…      [2] Turns
-│ T1  ● user      …                      1.2k  ┃ ⚙ bash · T1 · step 3
-│     ⚙ tool      bash ls -la → total…   2.1k  ┃ Payload {"command": …}
-│ T2  ● user      …                            ┃ Result  total 744 …
-│  ├⎇ try-redis   ▸ squashed · 9 turns         ┃ Timing  started … · 21 ms
-│  ╰⎇ fix-flaky   ▾ open · 6 turns · haiku     ┃ Crop    protected: latest-per-tool
+│ turn  step                                    tokens
+│ T1  ● user      …                              1.2k  ┃ ⚙ bash · T1 · step 3
+│     ⚙ tool      bash ls -la → total…          ~2.1k  ┃ Payload {"command": …}
+│ T2  ● user      …                                    ┃ Result  total 744 …
+│  ├⎇ try-redis   ▸ squashed · 9 turns                 ┃ Timing  started … · 21 ms
+│  ╰⎇ fix-flaky   ▾ open · 6 turns · haiku             ┃ Crop    protected: latest-per-tool
 │  │  ● user …
+└ ⏎ go  b branch  m merge  c crop  x undo  ? help  q back
 ```
 
 - Rows are the *active path*. Above the fork point they belong to the trunk (jumping there
   forks the trunk); below, to your branch. `T<n>` counts turns along the path.
+- The header's context string is the same one the prompt gauge shows, character for
+  character. The lanes only appear once there are three turns to plot; a session with no
+  messages says so instead of drawing an empty frame.
 - `⎇` rows hang off the message they were forked from. Colours: open green, squashed blue,
   rejected red, abandoned/deleted grey.
 - From inside a branch, its own `⎇` row is drawn at the fork point with `← here`; the rows
@@ -90,11 +112,17 @@ Palette: **Context tree**, **Branch here**, **Merge branch**, **Decisions**, **L
   trunk continuing past your fork point); `⏎` switches to them, `→` expands them.
 - Sessions made with OpenCode's own `/fork` are adopted into the tree automatically (matched
   to their parent by the copied message prefix; they show under the session's title).
-- Tokens: `~` means estimated (chars/4); assistant steps use the model's own counts.
+- Tokens: a leading `~` means estimated (chars/4); assistant steps use the model's own counts.
+  Step durations and lane heights are read from the same data — estimated wherever the `~` is.
 - `⚠` ≥10k tokens, `✂` cropped, `✗` tool error, `◆` decision record, `◇` branch summary.
-- The gauge on the prompt line: `ctx 46k/200k · filling ▲+24% (bash)` — absolute bands
-  (<8k low · 8–32k healthy · 32–64k filling · ≥64k red), the jump since the last look and
-  what caused it. One toast when you enter red; one when OpenCode's auto-compaction is near.
+- A branch you just made says `just branched, nothing here yet` — there is nothing to unfold.
+- The gauge on the prompt line: `⎇ fix-flaky · ctx ~46k/200k · filling ▲+24% (bash)` —
+  absolute bands (<8k low · 8–32k healthy · 32–64k filling · ≥64k red), the jump since the
+  last look and what caused it. One toast when you enter red; one when OpenCode's
+  auto-compaction is near.
+- The sidebar card, under a **Context tree** heading: `⎇ <branch>` and, on its own line,
+  `open · from "<the session you forked>"` — or `trunk · 2 branches` when you are on the
+  trunk. Active crops add `✂ 2 crops · ~31k hidden`; last line is the `/tree · ctrl+q` hint.
 
 ## Headless (desktop / web / scripts)
 

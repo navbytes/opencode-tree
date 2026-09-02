@@ -9,6 +9,7 @@ import argparse, os, pty, select, sys, time, fcntl, termios, struct, signal
 p = argparse.ArgumentParser(); p.add_argument("--cols", type=int, default=140); p.add_argument("--rows", type=int, default=40)
 p.add_argument("--timeout", type=float, default=20); p.add_argument("--keys", action="append", default=[]); p.add_argument("--out", default="pty.out")
 p.add_argument("--exit-when-done", dest="exit_when_done", action="store_true", help="stop capturing 1s after the last key was sent")
+p.add_argument("--png-dir", dest="png_dir", default=None, help="also render every screen snapshot to <dir>/<n>-<label>.png (needs Pillow)")
 p.add_argument("cmd", nargs=argparse.REMAINDER); a = p.parse_args()
 cmd = a.cmd[1:] if a.cmd and a.cmd[0] == "--" else a.cmd
 pid, fd = pty.fork()
@@ -35,9 +36,49 @@ try:
 except Exception:
     screen = None; stream = None
 screens = []
+PALETTE = {"default": None, "black": "#1e1e1e", "red": "#ff6b6b", "green": "#6bd36b", "brown": "#ffd76b", "yellow": "#ffd76b",
+           "blue": "#6b9bff", "magenta": "#d78bff", "cyan": "#6bd7ff", "white": "#e6e6e6"}
+def color(v, default):
+    if v is None or v == "default": return default
+    if v.startswith("bright"): v = v[6:]
+    if v in PALETTE: return PALETTE[v] or default
+    if len(v) == 6:
+        try: int(v, 16); return "#" + v
+        except ValueError: pass
+    return default
+def render_png(path):
+    from PIL import Image, ImageDraw, ImageFont
+    size = 15
+    regular = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", size, index=0)
+    bold = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", size, index=1)
+    # Menlo has no U+2387 (⎇); Apple Symbols does
+    try: symbols = ImageFont.truetype("/System/Library/Fonts/Apple Symbols.ttf", size)
+    except Exception: symbols = None
+    cw, ch = int(regular.getlength("M")), int(size * 1.3)
+    img = Image.new("RGB", (cw * a.cols + 16, ch * a.rows + 16), "#1e1e1e")
+    d = ImageDraw.Draw(img)
+    for y in range(a.rows):
+        row = screen.buffer[y]
+        for x in range(a.cols):
+            c = row[x]
+            fg, bg = color(c.fg, "#d4d4d4"), color(c.bg, None)
+            if c.reverse: fg, bg = (bg or "#1e1e1e"), (fg or "#d4d4d4")
+            px, py = 8 + x * cw, 8 + y * ch
+            if bg: d.rectangle([px, py, px + cw, py + ch], fill=bg)
+            if c.data and c.data != " ":
+                font = symbols if (symbols and c.data == "\u2387") else (bold if c.bold else regular)
+                d.text((px, py), c.data, font=font, fill=fg)
+    img.save(path)
 def snapshot(label):
     if screen is None: return
     screens.append((label, "\n".join(line.rstrip() for line in screen.display)))
+    if a.png_dir:
+        try:
+            os.makedirs(a.png_dir, exist_ok=True)
+            safe = "".join(ch if ch.isalnum() else "_" for ch in label)[:40]
+            render_png(os.path.join(a.png_dir, f"{len(screens):02d}-{safe}.png"))
+        except Exception as e:
+            sys.stderr.write(f"png render failed: {e}\n")
 while time.time() - start < a.timeout:
     now = time.time() - start
     while ki < len(timed) and now >= timed[ki][0]:

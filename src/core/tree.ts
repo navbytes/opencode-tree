@@ -156,8 +156,28 @@ function ctreeKindOf(message: TranscriptMessage): string | undefined {
   return undefined
 }
 
-function findLastUserIndex(messages: TranscriptMessage[]): number {
-  for (let i = messages.length - 1; i >= 0; i--) if (messages[i]!.role === "user") return i
+/** Marker `say()` puts on every headless `/ctree …` reply (src/server/index.ts). */
+const PLUGIN_COMMAND_PREFIX = "[context tree]"
+
+/** A headless `/ctree …` runs as an OpenCode command, so it leaves a user turn carrying
+ *  the marker plus a one-line acknowledgement: plugin plumbing, not conversation. */
+function isPluginCommand(message: TranscriptMessage): boolean {
+  const text = message.parts.find((p) => p.type === "text" && p.text)?.text
+  return text !== undefined && text.startsWith(PLUGIN_COMMAND_PREFIX)
+}
+
+/** Plugin command turns are hidden everywhere but `all`, and while hidden they are not
+ *  turns at all — `T<n>` numbers what you can see, so it never skips (DESIGN.md §7.2). */
+function hiddenPluginTurn(filter: Filter, message: TranscriptMessage): boolean {
+  return filter !== "all" && message.role === "user" && isPluginCommand(message)
+}
+
+function countTurns(filter: Filter, messages: TranscriptMessage[]): number {
+  return messages.reduce((n, m) => (m.role === "user" && !hiddenPluginTurn(filter, m) ? n + 1 : n), 0)
+}
+
+function findLastUserIndex(messages: TranscriptMessage[], filter: Filter): number {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i]!.role === "user" && !hiddenPluginTurn(filter, messages[i]!)) return i
   return -1
 }
 
@@ -359,7 +379,7 @@ function pushBranch(ctx: Ctx, branch: BranchLike, o: { depth: number; gutter: st
     name: branch.name ?? branchTranscript?.title ?? branch.sessionID,
     status: branch.forgotten ? "deleted" : (branch.status ?? "open"),
     note: branch.note,
-    turns: tail.filter((m) => m.role === "user").length,
+    turns: countTurns(ctx.filter, tail),
     tokens: aggregateTokens(tail),
     model: branch.model,
     expanded,
@@ -371,7 +391,7 @@ function pushBranch(ctx: Ctx, branch: BranchLike, o: { depth: number; gutter: st
 
   if (!o.spine && expanded && branchTranscript) {
     // continue the parent's turn numbering: the branch's first turn follows the anchor's turn
-    const turnAtAnchor = parentTranscript ? parentTranscript.messages.slice(0, anchorIndex + 1).filter((m) => m.role === "user").length : 0
+    const turnAtAnchor = parentTranscript ? countTurns(ctx.filter, parentTranscript.messages.slice(0, anchorIndex + 1)) : 0
     renderMessages(ctx, branch.sessionID, tail, o.depth + 1, "│ ", out, { turn: turnAtAnchor })
   }
 }
@@ -431,35 +451,40 @@ function renderMessages(
   counter: { turn: number } = { turn: 0 },
   lastUserIndexOverride?: number,
 ): void {
-  const lastUserIndex = lastUserIndexOverride ?? findLastUserIndex(messages)
+  const lastUserIndex = lastUserIndexOverride ?? findLastUserIndex(messages, ctx.filter)
+  // set by a hidden plugin command turn, so the acknowledgement that follows it goes too
+  let inPluginCommand = false
   messages.forEach((message, i) => {
     if (message.role === "user") {
-      counter.turn++
-      const turn = counter.turn
-      const label = ctx.labels[message.id]
-      const isDecision = ctx.state.decisions[message.id] !== undefined || ctreeKindOf(message) === "decision"
-      const isSummary = ctreeKindOf(message) === "summary"
-      if (turnAllowed(ctx.filter, label)) {
-        out.push({
-          kind: "turn",
-          id: `${sessionID}:${message.id}`,
-          sessionID,
-          messageID: message.id,
-          turn,
-          depth,
-          gutter,
-          glyph: "●",
-          preview: messagePreview(message),
-          tokens: estimateTokens(userText(message)),
-          estimated: true,
-          label,
-          isCurrent: sessionID === ctx.currentSessionID,
-          isTip: i === lastUserIndex,
-          isDecision,
-          isSummary,
-        })
+      inPluginCommand = hiddenPluginTurn(ctx.filter, message)
+      if (!inPluginCommand) {
+        counter.turn++
+        const turn = counter.turn
+        const label = ctx.labels[message.id]
+        const isDecision = ctx.state.decisions[message.id] !== undefined || ctreeKindOf(message) === "decision"
+        const isSummary = ctreeKindOf(message) === "summary"
+        if (turnAllowed(ctx.filter, label)) {
+          out.push({
+            kind: "turn",
+            id: `${sessionID}:${message.id}`,
+            sessionID,
+            messageID: message.id,
+            turn,
+            depth,
+            gutter,
+            glyph: "●",
+            preview: messagePreview(message),
+            tokens: estimateTokens(userText(message)),
+            estimated: true,
+            label,
+            isCurrent: sessionID === ctx.currentSessionID,
+            isTip: i === lastUserIndex,
+            isDecision,
+            isSummary,
+          })
+        }
       }
-    } else {
+    } else if (!inPluginCommand) {
       emitAssistantRows(ctx, sessionID, message, depth, gutter, out)
     }
     // Branches attach right after their anchor — the last message they share with
@@ -625,7 +650,7 @@ export function buildTreeView(o: BuildOptions): TreeView {
       continue
     }
     const segment = transcript.messages.slice(from)
-    const lastUser = findLastUserIndex(segment)
+    const lastUser = findLastUserIndex(segment, o.filter)
     renderMessages(ctx, sessionID, segment, depth, gutter, allRows, counter, lastUser)
   }
   emitElsewhere(ctx, ancestorTails, allRows)

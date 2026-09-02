@@ -48,6 +48,16 @@ describe("lanes", () => {
     expect(w.columnAt(0)).toBe(0)
     expect(w.columnAt(w.input.length - 1)).toBe(3)
   })
+  test("duration mode spreads cells by wall clock, so it does not draw like turns mode", () => {
+    const columns = [
+      { messageID: "a", turn: 1, input: 1000, output: 0, tool: 1000, toolError: false, ms: 1000 },
+      { messageID: "b", turn: 2, input: 2000, output: 0, tool: 8000, toolError: false, ms: 9000 },
+    ]
+    const w = durationWeighted({ mode: "turns", columns }, 20)
+    expect(w.tool.filter((v) => v === 8000).length).toBeGreaterThan(w.tool.filter((v) => v === 1000).length * 3)
+    const even = sparkline(fitColumns(columns.map((c) => c.tool), 20), 20)
+    expect(sparkline(fitColumns(w.tool, 20), 20)).not.toBe(even)
+  })
   test("duration weighting keeps tool sizes and flags errors separately", () => {
     const w = durationWeighted({ mode: "turns", columns: [{ messageID: "a", turn: 1, input: 0, output: 0, tool: 500, toolError: true, ms: 10 }] }, 4)
     expect(w.tool.every((v) => v === 500)).toBe(true)

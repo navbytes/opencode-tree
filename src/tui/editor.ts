@@ -15,13 +15,15 @@ export function hasEditor(): boolean {
   return Boolean(process.env["VISUAL"] || process.env["EDITOR"])
 }
 
-export async function editInExternalEditor(renderer: RendererLike, value: string, cwd?: string): Promise<string | undefined> {
+export async function editInExternalEditor(renderer: RendererLike, value: string, cwd?: string, notice?: string): Promise<string | undefined> {
   const editor = process.env["VISUAL"] || process.env["EDITOR"]
   if (!editor) return undefined
   // private dir + 0600: the draft can quote source, and /tmp is world-readable
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ctree-"))
   const file = path.join(dir, "decision.md")
-  fs.writeFileSync(file, value, { mode: 0o600 })
+  // the notice is a markdown comment, so it never lands in the trunk even if left in place
+  const header = notice ? `<!--\n${notice}\n-->\n\n` : ""
+  fs.writeFileSync(file, header + value, { mode: 0o600 })
   renderer.suspend()
   renderer.currentRenderBuffer?.clear?.()
   try {
@@ -32,7 +34,7 @@ export async function editInExternalEditor(renderer: RendererLike, value: string
       child.on("error", reject)
       child.on("exit", (code, signal) => (code === 0 ? resolve() : reject(new Error(`editor exited with ${signal ? `signal ${signal}` : `code ${code}`}`))))
     })
-    const text = fs.readFileSync(file, "utf8")
+    const text = fs.readFileSync(file, "utf8").replace(/^<!--[\s\S]*?-->\s*/, "")
     return text.trim() ? text : undefined
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })

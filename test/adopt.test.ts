@@ -56,10 +56,33 @@ describe("findForkParent", () => {
     expect(findForkParent(fork, [wrongRole, wrongTime, parent])?.parentID).toBe("s_parent")
   })
 
-  test("rejects a candidate with fewer messages than the fork", () => {
-    const shortParent = session("s_parent", "Fix it", 100, messages("m", ["user"]))
+  test("adopts a fork that already has turns of its own: only the copied head has to match", () => {
+    const parent = session("s_parent", "Fix it", 100, parentMessages)
+    // 2 copied messages (created 1000/1001), then 2 turns the fork took on its own
+    const forkMessages = [...messages("f", ["user", "assistant"]), ...messages("f2", ["user", "assistant", "user", "assistant"], 9000)]
+    const fork = session("s_fork", "Fix it (fork #1)", 200, forkMessages)
+    expect(findForkParent(fork, [parent])).toEqual({ parentID: "s_parent", anchorMessageID: "m_1" })
+  })
+
+  test("a fork of a fork prefers the parent's longer shared prefix over the grandparent's", () => {
+    const root = session("s_root", "Fix it", 100, messages("r", ["user", "assistant"], 1000))
+    // mid copied the root's two messages (fresh ids, same `created`) and took two turns of its own
+    const mid = session("s_mid", "Renamed by hand", 150, [...messages("mc", ["user", "assistant"], 1000), ...messages("mo", ["user", "assistant"], 4000)])
+    const fork = session("s_fork", "Renamed too", 200, [...messages("fc", ["user", "assistant"], 1000), ...messages("fo", ["user", "assistant"], 4000), ...messages("fw", ["user"], 9000)])
+    // neither title helps here, and the root is the *older* of the two: only the prefix length picks mid
+    expect(findForkParent(fork, [root, mid])).toEqual({ parentID: "s_mid", anchorMessageID: "mo_1" })
+  })
+
+  test("a candidate that shares nothing from the first message is not a parent", () => {
+    const stranger = session("s_other", "Other work", 100, messages("o", ["user", "assistant"], 7000))
     const fork = session("s_fork", "Fix it (fork #1)", 200, messages("f", ["user", "assistant"]))
-    expect(findForkParent(fork, [shortParent])).toBeUndefined()
+    expect(findForkParent(fork, [stranger])).toBeUndefined()
+  })
+
+  test("a candidate created after the fork cannot be its parent, however much it shares", () => {
+    const younger = session("s_young", "Fix it", 300, parentMessages)
+    const fork = session("s_fork", "Fix it (fork #1)", 200, messages("f", ["user", "assistant"]))
+    expect(findForkParent(fork, [younger])).toBeUndefined()
   })
 
   test("a fork with no copied messages cannot be anchored", () => {
