@@ -1,31 +1,27 @@
 /** @jsxImportSource @opentui/solid */
 /**
- * TUI plugin half (DESIGN.md §3.2, §5, §7).
- *
- * Registers the `/tree` palette command + `ctree` route (a first cut of the
- * combined tree + trajectory view: for now just the trajectory rows of the
- * active session, with a context-size header) and the `session_prompt_right`
- * gauge slot. No crop/merge UI yet — that lands once the server half's crop
- * plumbing has a TUI-side journal writer to drive it.
+ * TUI plugin half (DESIGN.md §3.2, §5, §7): `/tree` (aliases `/ctree`, `/panel`),
+ * `/branch`, `/label`, the `ctree` route, and the prompt-side gauge slot.
  */
-import type { TuiPlugin } from "@opencode-ai/plugin/tui"
-import { createMemo, For } from "solid-js"
-import { bandFor, contextSizeOf, estimateTokens, type MinimalMessage, type MinimalPart } from "../core/tokens.js"
+import type { TuiPluginApi, TuiPlugin } from "@opencode-ai/plugin/tui"
+import { createMemo } from "solid-js"
+import { bandFor, contextSizeOf, type MinimalMessage, type MinimalPart } from "../core/tokens.js"
+import { JournalStore, type StorageMode } from "../shared/store.js"
+import { debug } from "../shared/debug.js"
+import { createNamedBranch, setLabel } from "./actions.js"
+import { TreeRoute, formatK } from "./route.js"
 
-const BAND_COLOR: Record<ReturnType<typeof bandFor>, "success" | "warning" | "error"> = {
-  low: "success",
-  healthy: "success",
-  filling: "warning",
-  red: "error",
+const BAND_COLOR = { low: "success", healthy: "success", filling: "warning", red: "error" } as const
+
+type Options = { storage: StorageMode; jumpSummary: "ask" | "never" }
+
+function parseOptions(raw: Record<string, unknown> | undefined): Options {
+  return {
+    storage: raw?.["storage"] === "global" ? "global" : "local",
+    jumpSummary: raw?.["jumpSummary"] === "never" ? "never" : "ask",
+  }
 }
 
-function formatK(tokens: number): string {
-  if (tokens < 1000) return String(tokens)
-  const k = (tokens / 1000).toFixed(1)
-  return `${k.endsWith(".0") ? k.slice(0, -2) : k}k`
-}
-
-/** Bridges `api.state`'s live Message/Part shapes into core/tokens's minimal structural type. */
 function toMinimalMessages(messages: readonly any[], part: (messageID: string) => readonly any[]): MinimalMessage[] {
   return messages.map((m) => ({
     info: m.role === "assistant" ? { role: "assistant", tokens: m.tokens } : { role: m.role },
@@ -40,111 +36,131 @@ function toMinimalMessages(messages: readonly any[], part: (messageID: string) =
   }))
 }
 
-function rowGlyph(role: string): string {
-  return role === "user" ? "●" : role === "assistant" ? "○" : "◇"
+function currentSession(api: TuiPluginApi): string | undefined {
+  const cur = api.route.current
+  return cur.name === "session" ? ((cur.params as { sessionID?: string } | undefined)?.sessionID ?? undefined) : undefined
 }
 
-function rowPreview(part: (messageID: string) => readonly any[], messageID: string): string {
-  return part(messageID)
-    .map((p) => (p.type === "text" ? p.text : p.type === "tool" ? `[${p.tool}]` : ""))
-    .filter(Boolean)
-    .join(" ")
-    .slice(0, 60)
-}
+const tui: TuiPlugin = async (api, rawOptions) => {
+  const options = parseOptions(rawOptions as Record<string, unknown> | undefined)
+  const directory = api.state.path.directory
+  const store = new JournalStore({ worktree: api.state.path.worktree || directory, stateDir: api.state.path.state, mode: options.storage })
+  debug("tui.loaded", { path: api.state.path, options })
 
-const tui: TuiPlugin = async (api) => {
+  const promptDialog = (title: string, placeholder?: string) =>
+    new Promise<string | undefined>((resolve) => {
+      api.ui.dialog.replace(
+        () =>
+          api.ui.DialogPrompt({
+            title,
+            placeholder,
+            onConfirm: (v) => {
+              debug("prompt.confirm", { v })
+              resolve(v)
+              api.ui.dialog.clear()
+            },
+            onCancel: () => {
+              debug("prompt.cancel")
+              resolve(undefined)
+              api.ui.dialog.clear()
+            },
+          }),
+        () => {
+          debug("prompt.close")
+          resolve(undefined)
+        },
+      )
+    })
+
+  // Palette `run` handlers must return synchronously: an awaited promise keeps the palette
+  // open, and its own close then clears any dialog we opened. Fire-and-forget instead.
+  const detached = (fn: () => Promise<void>) => () => {
+    void fn().catch((e) => api.ui.toast({ variant: "error", message: e instanceof Error ? e.message : String(e) }))
+  }
+
   api.keymap.registerLayer({
     commands: [
       {
         namespace: "palette",
         name: "ctree.open",
         title: "Context tree",
+        description: "Tree + trajectory of this session",
         category: "Context",
         slashName: "tree",
         slashAliases: ["ctree", "panel"],
         run: () => {
-          const current = api.route.current
-          api.route.navigate("ctree", current.name === "session" ? { sessionID: (current.params as any).sessionID } : {})
+          const sessionID = currentSession(api)
+          api.route.navigate("ctree", sessionID ? { sessionID } : {})
           api.ui.dialog.clear()
         },
       },
+      {
+        namespace: "palette",
+        name: "ctree.branch",
+        title: "Branch here",
+        description: "Fork the current session into a named branch",
+        category: "Context",
+        slashName: "branch",
+        enabled: () => Boolean(currentSession(api)),
+        run: detached(async () => {
+          const sessionID = currentSession(api)
+          if (!sessionID) return
+          await new Promise((r) => setTimeout(r, 30))
+          const name = await promptDialog("Branch name", "fix-flaky-test")
+          debug("branch.named", { name })
+          if (!name) return
+          try {
+            await createNamedBranch({ api, store, directory }, { sessionID, name })
+          } catch (e) {
+            api.ui.toast({ variant: "error", message: `branch: ${e instanceof Error ? e.message : String(e)}` })
+          }
+        }),
+      },
+      {
+        namespace: "palette",
+        name: "ctree.label",
+        title: "Label this point",
+        description: "Bookmark the last message of the session",
+        category: "Context",
+        slashName: "label",
+        enabled: () => Boolean(currentSession(api)),
+        run: detached(async () => {
+          const sessionID = currentSession(api)
+          if (!sessionID) return
+          await new Promise((r) => setTimeout(r, 30))
+          const last = api.state.session.messages(sessionID).at(-1)
+          if (!last) return
+          const value = await promptDialog("Label (empty to remove)", "checkpoint")
+          if (value === undefined) return
+          setLabel({ api, store, directory }, { sessionID, messageID: last.id, label: value.trim() || null })
+          api.ui.toast({ variant: "success", message: value.trim() ? `labelled: ${value.trim()}` : "label removed" })
+        }),
+      },
     ],
+    bindings: [{ key: "ctrl+q", cmd: "ctree.open" }],
   })
 
   api.route.register([
     {
       name: "ctree",
-      render: ({ params }) => {
-        const sessionID = () => params?.["sessionID"] as string | undefined
-
-        const rows = createMemo(() => {
-          const id = sessionID()
-          if (!id) return []
-          return api.state.session.messages(id).map((m) => {
-            const preview = rowPreview(api.state.part, m.id)
-            const tokens =
-              m.role === "assistant" && typeof (m as any).tokens?.input === "number"
-                ? (m as any).tokens.input
-                : estimateTokens(preview)
-            return { role: m.role, glyph: rowGlyph(m.role), preview, tokens }
-          })
-        })
-
-        const contextSize = createMemo(() => {
-          const id = sessionID()
-          if (!id) return { tokens: 0, estimated: true as const }
-          return contextSizeOf(toMinimalMessages(api.state.session.messages(id), api.state.part))
-        })
-        const band = createMemo(() => bandFor(contextSize().tokens))
-
-        api.keymap.registerLayer({
-          commands: [
-            {
-              name: "ctree.back",
-              hidden: true,
-              run: () => api.route.navigate("session", { sessionID: sessionID() }),
-            },
-          ],
-          bindings: [
-            { key: "escape", cmd: "ctree.back" },
-            { key: "q", cmd: "ctree.back" },
-          ],
-        })
-
-        const t = api.theme.current
-
-        return (
-          <box flexDirection="column" padding={1} backgroundColor={t.background}>
-            <text fg={t.primary}>
-              ┌ Context tree · {sessionID() ?? "no session"} ─ {rows().length} rows
-            </text>
-            <text fg={t[BAND_COLOR[band()]]}>
-              │ ctx {formatK(contextSize().tokens)}
-              {contextSize().estimated ? "~" : ""} · {band()}
-            </text>
-            <For each={rows()}>
-              {(r) => (
-                <text fg={t.text}>
-                  │ {r.glyph} {r.role.padEnd(9)} {r.preview} {formatK(r.tokens)}t
-                </text>
-              )}
-            </For>
-            <text fg={t.textMuted}>└ q/esc back</text>
-          </box>
-        )
-      },
+      render: ({ params }) => (
+        <TreeRoute api={api} store={store} directory={directory} sessionID={params?.["sessionID"] as string | undefined} options={{ jumpSummary: options.jumpSummary }} />
+      ),
     },
   ])
 
   api.slots.register({
     slots: {
       session_prompt_right: (_ctx, props: { session_id: string }) => {
-        const size = createMemo(() =>
-          contextSizeOf(toMinimalMessages(api.state.session.messages(props.session_id), api.state.part)),
-        )
+        const size = createMemo(() => contextSizeOf(toMinimalMessages(api.state.session.messages(props.session_id), api.state.part)))
         const t = api.theme.current
         const band = () => bandFor(size().tokens)
-        return <text fg={t[BAND_COLOR[band()]]}>ctx {formatK(size().tokens)}</text>
+        const branch = () => store.stateForSession(props.session_id)?.sessions[props.session_id]
+        return (
+          <text fg={t[BAND_COLOR[band()]]}>
+            {branch() ? `⎇ ${branch()!.name ?? "branch"} · ` : ""}ctx {formatK(size().tokens)}
+          </text>
+        )
       },
     },
   })

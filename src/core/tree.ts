@@ -55,6 +55,8 @@ export type StepRow = {
   isError: boolean
   isCropped: boolean
   warn: boolean
+  /** Label of the owning message, shown on its first step row only. */
+  label?: string
 }
 
 export type BranchRow = {
@@ -208,11 +210,12 @@ function buildAnchorMap(state: TreeState): Map<string, BranchState[]> {
 // Filters.
 // ---------------------------------------------------------------------------
 
-function stepAllowed(filter: Filter, kind: "text" | "tool" | "reasoning" | "other"): boolean {
+function stepAllowed(filter: Filter, kind: "text" | "tool" | "reasoning" | "other", labelled = false): boolean {
   switch (filter) {
     case "user-only":
-    case "labeled":
       return false
+    case "labeled":
+      return labelled
     case "default":
       return kind !== "other"
     case "no-tools":
@@ -280,10 +283,13 @@ function emitAssistantRows(ctx: Ctx, sessionID: string, message: TranscriptMessa
     return
   }
 
+  let first = true
   for (const part of message.parts) {
     const kind = stepKind(part)
-    if (!stepAllowed(ctx.filter, kind)) continue
+    const label = first ? ctx.labels[message.id] : undefined
+    if (!stepAllowed(ctx.filter, kind, Boolean(label))) continue
     const { tokens, estimated } = stepTokensFor(part, message)
+    first = false
     out.push({
       kind: "step",
       id: `${sessionID}:${message.id}:${part.id}`,
@@ -300,6 +306,7 @@ function emitAssistantRows(ctx: Ctx, sessionID: string, message: TranscriptMessa
       isError: part.state?.status === "error",
       isCropped: isCropped(ctx, message.id, part.id),
       warn: tokens >= WARN_TOKENS,
+      label,
     })
   }
 }
@@ -404,7 +411,7 @@ function rowSearchFields(row: Row): string[] {
     case "turn":
       return row.label ? [row.preview, row.label] : [row.preview]
     case "step":
-      return [row.preview]
+      return row.label ? [row.preview, row.label] : [row.preview]
     case "branch":
       return row.model ? [row.name, row.model, row.status] : [row.name, row.status]
   }
@@ -496,6 +503,8 @@ export function buildTreeView(o: BuildOptions): TreeView {
 
   const allRows: Row[] = []
   const counter = { turn: 0 }
+  // branches forked before the first message anchor on "" and sit above everything
+  emitBranches(ctx, ancestorChain[0] ?? o.currentSessionID, "", 0, allRows)
   // Spine segments (see header comment). A missing ancestor transcript degrades to
   // rendering the current session's own copy of that prefix.
   const spine = [...ancestorChain, o.currentSessionID]

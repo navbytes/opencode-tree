@@ -5,6 +5,7 @@
  */
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { JournalStore } from "../shared/store.js"
+import { debug } from "../shared/debug.js"
 
 export type JumpPlan =
   | { kind: "noop"; reason: string }
@@ -107,12 +108,16 @@ export async function createNamedBranch(
 ): Promise<string> {
   const msgs = ctx.api.state.session.messages(input.sessionID)
   const last = msgs[msgs.length - 1]
+  debug("branch.start", { sessionID: input.sessionID, name: input.name, messages: msgs.length, status: ctx.api.state.session.status(input.sessionID) })
   if (!last) throw new Error("nothing to branch from yet")
   await abortIfBusy(ctx, input.sessionID)
+  debug("branch.afterAbort")
   // Fork "after the tip": OpenCode copies messages strictly before messageID, so we pass a
   // sentinel by forking without messageID (full copy) — the SDK accepts messageID undefined.
   const treeId = ctx.store.ensureTree(input.sessionID, "tui")
+  debug("branch.tree", { treeId })
   const forked = await ctx.api.client.session.fork({ sessionID: input.sessionID, directory: ctx.directory })
+  debug("branch.forked", { data: forked.data, error: forked.error })
   const forkedID = (forked.data as any)?.id as string | undefined
   if (!forkedID) throw new Error("fork did not return a session id")
   ctx.store.registerSession(forkedID, treeId)
@@ -122,12 +127,15 @@ export async function createNamedBranch(
     { sessionID: forkedID, parentSessionID: input.sessionID, anchorMessageID: last.id, name: input.name, kind: "explicit", branchModel: input.model, trunkModel: input.trunkModel },
     "tui",
   )
+  debug("branch.recorded")
   ctx.store.record(treeId, "label.set", { sessionID: input.sessionID, messageID: last.id, label: `⎇ ${input.name}` }, "tui")
   await ctx.api.client.session.update({ sessionID: forkedID, directory: ctx.directory, title: `⎇ ${input.name}` }).catch(() => undefined)
   await mirrorMetadata(ctx, forkedID, { treeId, parentSessionID: input.sessionID, anchorMessageID: last.id, name: input.name, status: "open" })
   await mirrorMetadata(ctx, input.sessionID, { treeId })
+  debug("branch.mirrored")
   navigateToSession(ctx, forkedID)
   ctx.api.ui.toast({ variant: "success", message: `⎇ ${input.name} opened${input.model ? ` on ${input.model}` : ""}` })
+  debug("branch.done", { forkedID })
   return forkedID
 }
 
@@ -137,6 +145,7 @@ export async function executeJump(
   plan: JumpPlan,
   opts: { currentSessionID: string; summary: SummaryChoice },
 ): Promise<string | undefined> {
+  debug("jump.plan", { plan, current: opts.currentSessionID, summary: opts.summary.kind })
   if (plan.kind === "noop") {
     ctx.api.ui.toast({ message: plan.reason })
     return undefined
@@ -152,6 +161,7 @@ export async function executeJump(
   if (opts.summary.kind === "summarize" && leavingTip && target !== opts.currentSessionID) {
     await summarizeInto(ctx, { fromSessionID: opts.currentSessionID, fromMessageID: leavingTip, targetSessionID: target, customInstructions: opts.summary.customInstructions })
   }
+  debug("jump.navigate", { target })
   navigateToSession(ctx, target)
   if (plan.kind === "fork" && plan.prefill) {
     await new Promise((r) => setTimeout(r, 0))
@@ -178,6 +188,7 @@ export async function summarizeInto(
     })
     .filter(Boolean)
     .join("\n\n")
+  debug("summary.start", { from: input.fromSessionID, target: input.targetSessionID, chars: transcript.length })
   const helper = await ctx.api.client.session.create({ directory: ctx.directory, title: "Context tree: branch summary" })
   const helperID = (helper.data as any)?.id as string | undefined
   if (!helperID) throw new Error("could not create helper session")
@@ -194,6 +205,7 @@ export async function summarizeInto(
       .map((p) => p.text)
       .join("")
       .trim()
+    debug("summary.generated", { chars: summary?.length ?? 0 })
     if (!summary) throw new Error("summary model returned no text")
     const injected = await ctx.api.client.session.prompt({
       sessionID: input.targetSessionID,
