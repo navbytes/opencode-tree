@@ -38,10 +38,6 @@ e.g. `{ "keybinds": { "open": "ctrl+t", "up": "k,up", "copy": "none" } }` — na
 unfold toggle go branch label filter_pick filter_prev search search_next search_prev back
 crop crop_toggle_mode mark auto undo merge inspector consumers copy mode_duration mode_turns
 mode_calls lanes_off decisions export help`.
-- On long sessions the lanes show a window of the timeline: it opens at the newest events, stays
-  put while the cursor moves inside it, and follows the cursor in steps when it nears an edge
-  (`gg`/`G` jump it to the start/end). `…37` / `12…` at the edges count hidden events, and a dim
-  `all` track under the lanes shows where the window sits, with red ticks at failed tool calls.
 
 ## Upgrading
 
@@ -136,6 +132,10 @@ Palette: **Context tree**, **Branch here**, **Merge branch**, **Decisions**, **L
   default so the first screen is the clean outline; `1/2/3` bring in the lanes, `i` the inspector.
   The lanes are an event strip — one `▬` pill per prompt / model step / tool call on a shared time
   axis, coloured by lane (nothing is scaled by tokens); the row you are on draws inverted.
+- On long sessions the lanes show a window of the timeline: it opens at the newest events, stays
+  put while the cursor moves inside it, and follows the cursor in steps when it nears an edge
+  (`gg`/`G` jump it to the start/end). `…37` / `12…` at the edges count hidden events, and a dim
+  `all` track under the lanes shows where the window sits, with red ticks at failed tool calls.
 - On a long session the lanes are a window on that axis, and the window follows the cursor: move up
   into older rows (`k`, `gg`) and it scrolls back in steps, `G` returns to the newest. `…12` next to
   `Input` and `12…` after the lane count the events hidden either side, and the `all` line under
