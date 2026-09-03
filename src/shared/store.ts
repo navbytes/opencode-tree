@@ -91,7 +91,8 @@ export class JournalStore {
    */
   private withRegistryLock<T>(fn: () => T): T {
     const lockPath = `${this.registryPath()}.lock`
-    const deadline = Date.now() + LOCK_TIMEOUT_MS
+    const startedAt = Date.now()
+    const deadline = startedAt + LOCK_TIMEOUT_MS
     let fd: number | undefined
     let broke = false
     for (;;) {
@@ -108,7 +109,17 @@ export class JournalStore {
           } catch {}
           continue
         }
-        if (Date.now() >= deadline) break
+        if (Date.now() >= deadline) {
+          // the whole window has passed: a lock that predates our wait belongs to a dead
+          // holder (the critical section is one small write), so break it instead of
+          // leaving it to tax every later write with another full wait
+          if (lockMtimeMs(lockPath) <= startedAt) {
+            try {
+              fs.unlinkSync(lockPath)
+            } catch {}
+          }
+          break
+        }
         sleepSync(5)
       }
     }
@@ -235,6 +246,15 @@ function statKey(file: string): string | undefined {
     return `${st.mtimeMs}:${st.size}`
   } catch {
     return undefined
+  }
+}
+
+/** When a lock file was created; `Infinity` when it is already gone (so "predates X" is false). */
+function lockMtimeMs(lockPath: string): number {
+  try {
+    return fs.statSync(lockPath).mtimeMs
+  } catch {
+    return Infinity
   }
 }
 
