@@ -1,11 +1,11 @@
 /**
- * DSH-style timeline lanes (DESIGN.md §7.1, §7.3): one column per unit of the
- * chosen mode, three series — Input (context size at each assistant turn), Model
- * (output tokens per assistant step), Tools (result size per tool call, errors
- * flagged). Pure.
+ * DSH-style timeline lanes (DESIGN.md §7.1, §7.3): three series — Input, Model,
+ * Tools — over the chosen mode's x-axis. Two models live here: the original
+ * magnitude columns (`buildLanes` + `sparkline`) and the event strip
+ * (`buildEventStrip`), which is what the DSH bar actually draws. Pure.
  */
 import { estimateTokens } from "./tokens.js"
-import type { Transcript, TranscriptMessage } from "./transcript.js"
+import { stepKind, type StepPart, type Transcript, type TranscriptMessage } from "./transcript.js"
 
 export type LaneMode = "turns" | "calls" | "duration"
 
@@ -146,4 +146,165 @@ export function columnFor(lanes: Lanes, messageID: string, partID?: string): num
   }
   const i = lanes.columns.findIndex((c) => c.messageID === messageID || c.userMessageID === messageID)
   return i >= 0 ? i : -1
+}
+
+/* ── Event strip (DESIGN.md §7.1's DSH trajectory bar) ────────────────────────
+ * The strip is an *event* timeline, not a histogram: one small pill per event on
+ * one shared axis across the three lanes, gap between neighbours, width = duration
+ * in Duration mode. Colour is categorical (per lane), so nothing here scales by
+ * tokens — `tokens` rides along only for the inspector.
+ */
+
+export type LaneEvent = {
+  lane: "input" | "model" | "tools"
+  /** `context` = compaction/branch summary: machine-written context, not the human prompting */
+  kind: "user" | "context" | "text" | "reasoning" | "tool"
+  messageID: string
+  partID?: string
+  turn: number
+  startMs?: number
+  durationMs?: number
+  error?: boolean
+  tokens: number
+}
+
+/** One terminal cell of one lane. */
+export type StripCell = { lane: LaneEvent["lane"]; eventIndex: number; glyph: string; error?: boolean }
+
+export type EventStrip = {
+  /** time order; only the events that fit — see `truncatedLeft` */
+  events: LaneEvent[]
+  width: number
+  /** `width` cells each; null = gap/empty */
+  lanes: Record<LaneEvent["lane"], (StripCell | null)[]>
+  /** cell index range [start, end) of `events[i]`, for cursor/scroll mapping */
+  spans: { start: number; end: number }[]
+  /** lane has no events in the strip (render "no tool calls" etc.) */
+  empty: Record<LaneEvent["lane"], boolean>
+  /** older events dropped off the left because they did not fit */
+  truncatedLeft: number
+}
+
+const EVENT_GLYPH = "▬"
+
+function ctreeKindOf(message: TranscriptMessage): string | undefined {
+  for (const p of message.parts) {
+    const ctree = p.metadata?.["ctree"] as { kind?: string } | undefined
+    if (ctree?.kind) return ctree.kind
+  }
+  return undefined
+}
+
+function isContextMessage(message: TranscriptMessage): boolean {
+  return message.summary === true || ctreeKindOf(message) === "summary"
+}
+
+/** A whole message as one pill: user prompts and summaries read as single events. */
+function messageEvent(message: TranscriptMessage, turn: number): LaneEvent {
+  const ms = spanOf(message)
+  return {
+    lane: "input",
+    kind: isContextMessage(message) ? "context" : "user",
+    messageID: message.id,
+    turn,
+    startMs: message.time.created,
+    ...(ms > 0 ? { durationMs: ms } : {}),
+    tokens: message.parts.reduce((s, p) => s + estimateTokens(p.text ?? ""), 0),
+  }
+}
+
+function partEvent(message: TranscriptMessage, part: StepPart, turn: number): LaneEvent {
+  const t = part.state?.time ?? part.time
+  const base = {
+    messageID: message.id,
+    partID: part.id,
+    turn,
+    startMs: t?.start ?? message.time.created,
+    ...(t?.start !== undefined && t?.end !== undefined ? { durationMs: Math.max(0, t.end - t.start) } : {}),
+  }
+  if (part.type === "tool")
+    return { ...base, lane: "tools", kind: "tool", error: part.state?.status === "error", tokens: estimateTokens(part.state?.output ?? "") + estimateTokens(JSON.stringify(part.state?.input ?? "")) }
+  return { ...base, lane: "model", kind: part.type === "reasoning" ? "reasoning" : "text", tokens: estimateTokens(part.text ?? "") }
+}
+
+function eventsOf(transcript: Transcript): LaneEvent[] {
+  const out: LaneEvent[] = []
+  for (const turn of turnsOf(transcript.messages)) {
+    if (turn.user) out.push(messageEvent(turn.user, turn.index))
+    for (const m of turn.assistants) {
+      const context = isContextMessage(m)
+      if (context) out.push(messageEvent(m, turn.index))
+      for (const p of m.parts) {
+        const kind = stepKind(p)
+        // a summary's prose is already the context pill above; a tool call it made is still a tool call
+        if (kind === "other" || (context && kind !== "tool")) continue
+        out.push(partEvent(m, p, turn.index))
+      }
+    }
+  }
+  return out
+}
+
+/** Turns mode groups by turn, so a turn boundary breaks wider than a step boundary. */
+function gapBefore(events: LaneEvent[], i: number, mode: LaneMode): number {
+  return mode === "turns" && events[i]!.turn !== events[i - 1]!.turn ? 2 : 1
+}
+
+/** Index of the oldest event that still fits at one cell each — everything before it is dropped. */
+function firstFitting(events: LaneEvent[], mode: LaneMode, width: number): number {
+  let cells = 0
+  for (let i = events.length - 1; i >= 0; i--) {
+    const next = cells === 0 ? 1 : cells + 1 + gapBefore(events, i + 1, mode)
+    if (next > width) return i + 1
+    cells = next
+  }
+  return 0
+}
+
+function durationWidths(events: LaneEvent[], budget: number): number[] {
+  const total = events.reduce((s, e) => s + Math.max(0, e.durationMs ?? 0), 0)
+  if (total <= 0) return events.map(() => 1) // no timing data: read as the calls layout
+  const widths = events.map((e) => Math.max(1, Math.round((Math.max(0, e.durationMs ?? 0) / total) * budget)))
+  let over = widths.reduce((s, v) => s + v, 0) - budget
+  while (over > 0) {
+    let widest = -1
+    for (let i = 0; i < widths.length; i++) if ((widths[i] ?? 0) > 1 && (widest < 0 || (widths[i] ?? 0) > (widths[widest] ?? 0))) widest = i
+    if (widest < 0) break // every event is already down to its one cell
+    widths[widest] = (widths[widest] ?? 1) - 1
+    over--
+  }
+  return widths
+}
+
+export function buildEventStrip(transcript: Transcript, mode: LaneMode, width: number): EventStrip {
+  const w = Math.max(0, Math.floor(width))
+  const all = eventsOf(transcript)
+  const truncatedLeft = firstFitting(all, mode, w)
+  const events = all.slice(truncatedLeft)
+  const gaps = events.map((_, i) => (i === 0 ? 0 : gapBefore(events, i, mode)))
+  const widths = mode === "duration" ? durationWidths(events, w - gaps.reduce((s, g) => s + g, 0)) : events.map(() => 1)
+
+  const blank = (): (StripCell | null)[] => Array.from({ length: w }, () => null)
+  const lanes: EventStrip["lanes"] = { input: blank(), model: blank(), tools: blank() }
+  const empty: EventStrip["empty"] = { input: true, model: true, tools: true }
+  const spans: { start: number; end: number }[] = []
+  let cursor = 0
+  events.forEach((e, i) => {
+    const start = cursor + (gaps[i] ?? 0)
+    const end = Math.min(w, start + (widths[i] ?? 1))
+    for (let c = start; c < end; c++) lanes[e.lane][c] = { lane: e.lane, eventIndex: i, glyph: EVENT_GLYPH, ...(e.error ? { error: true } : {}) }
+    spans.push({ start, end })
+    empty[e.lane] = false
+    cursor = start + (widths[i] ?? 1)
+  })
+  return { events, width: w, lanes, spans, empty, truncatedLeft }
+}
+
+/** Index into `strip.events` of the event a message/part belongs to (-1 if it is not on the strip). */
+export function stripIndexFor(strip: EventStrip, messageID: string, partID?: string): number {
+  if (partID) {
+    const byPart = strip.events.findIndex((e) => e.partID === partID)
+    if (byPart >= 0) return byPart
+  }
+  return strip.events.findIndex((e) => e.messageID === messageID)
 }

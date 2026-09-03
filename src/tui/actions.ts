@@ -5,9 +5,13 @@
  */
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { createSignal } from "solid-js"
+import fs from "node:fs"
+import path from "node:path"
 import type { JournalStore } from "../shared/store.js"
 import type { CropAppliedData, JournalEntry } from "../core/journal.js"
 import type { UndoPlan } from "../core/undo.js"
+import type { TranscriptMessage } from "../core/transcript.js"
+import { contextSizeOf, formatK, type MinimalMessage } from "../core/tokens.js"
 import { DECISION_SYSTEM, branchTranscriptText, buildDecisionDraftPrompt, decisionMessageText, decisionTemplate, openSiblings } from "../core/decision.js"
 import { editInExternalEditor, hasEditor } from "./editor.js"
 import { debug } from "../shared/debug.js"
@@ -325,22 +329,55 @@ export type MergeMode = "squash" | "squash-no-llm" | "discard" | "tournament"
 /** The promise every merge confirmation repeats — the reason a merge is safe to try. */
 export const MERGE_TRUST = "Your transcript is never rewritten; the record is appended to the trunk as a normal message."
 
+/** The tree route's undo key (`x` stays as an alias); every hint we print names this one. */
+export const UNDO_KEY = "u"
+
 /** What the $EDITOR gate opens with: the draft is a proposal, saving is the confirmation. */
 export const MERGE_GATE_NOTICE = `Edit the ◆ decision record, then save to confirm (empty file or a non-zero exit aborts the merge).\n${MERGE_TRUST}`
 
-/** Shared copy for the merge picker (palette and route). */
-export function mergeDialogTitle(branchName: string, trunkTitle?: string): string {
-  return `Merge ⎇ ${branchName} → ${trunkTitle ? clip(trunkTitle, 28) : "the trunk"}`
+/** The discard gate's message: the same promise, plus the way back. */
+export const DISCARD_NOTICE = `${MERGE_TRUST}\nThe branch is only marked rejected — ${UNDO_KEY} (alias x) undoes it.`
+
+/** Where the merge lands, as the picker should name it. `label` is `TRUNK_LABEL` for the tree
+ *  root, else the parent branch's name; the figures come from the parent's own transcript. */
+export type MergeTarget = { label: string; turns: number; tokens: number }
+
+export const TRUNK_LABEL = "trunk"
+
+/** The picker's destination figures, computed the same way on every surface (the gauge's own
+ *  context size and the user-turn count) so the numbers on one screen agree. */
+export function mergeTargetOf(label: string, messages: readonly TranscriptMessage[]): MergeTarget {
+  const minimal = messages.map((m): MinimalMessage => ({ info: m.role === "assistant" ? { role: "assistant", tokens: m.tokens } : { role: "user" }, parts: m.parts }))
+  return { label, turns: messages.filter((m) => m.role === "user").length, tokens: contextSizeOf(minimal).tokens }
+}
+
+/** The branch's *own* user turns — the ones a squash folds into the record. Sliced like
+ *  `branchTranscriptText`: everything past the anchor's index in the parent (an unknown anchor
+ *  counts the whole session rather than throwing; this figure is only a label). */
+export function ownTurnCount(messages: readonly { role: string }[], anchor: { messageID?: string; parentMessageIDs: readonly string[] }): number {
+  const anchorIndex = anchor.messageID ? anchor.parentMessageIDs.indexOf(anchor.messageID) : -1
+  return messages.slice(anchorIndex + 1).filter((m) => m.role === "user").length
+}
+
+/** Shared copy for the merge picker (palette and route). Naming the destination "trunk" rather
+ *  than quoting the parent's title keeps the title from reading as a question ("→ What does git
+ *  rebase do?"). */
+export function mergeDialogTitle(branchName: string, target?: MergeTarget | string): string {
+  // a bare parent title is the old call shape, and quoting it is the bug: name the trunk instead
+  if (!target || typeof target === "string") return `Merge ⎇ ${branchName} → the trunk`
+  const where = target.label === TRUNK_LABEL ? TRUNK_LABEL : `⎇ ${clip(target.label, 24)}`
+  return `Merge ⎇ ${branchName} → ${where} (${plural(target.turns, "turn")}, ~${formatK(target.tokens)})`
 }
 
 /** Tournament only exists when there is something to compare against. Descriptions render on
  *  the option's own line, which truncates past ~50 columns — keep them short; the full promise
  *  is repeated at the confirmation step (`MERGE_TRUST`). */
-export function mergeDialogOptions(input: { siblings: number }): { title: string; value: MergeMode; description: string }[] {
+export function mergeDialogOptions(input: { siblings: number; turns?: number }): { title: string; value: MergeMode; description: string }[] {
+  const folds = input.turns === undefined ? "the branch" : plural(input.turns, "turn")
   return [
-    { title: "Squash", value: "squash" as const, description: "drafts a ◆ decision record you confirm" },
-    { title: "Squash without LLM", value: "squash-no-llm" as const, description: "you write the record yourself" },
-    { title: "Discard", value: "discard" as const, description: "rejected; nothing lands in the trunk" },
+    { title: "Squash", value: "squash" as const, description: `1 model call · folds ${folds} into one ◆ record` },
+    { title: "Squash without LLM", value: "squash-no-llm" as const, description: "you write it · no model call" },
+    { title: "Discard", value: "discard" as const, description: "rejected · nothing lands in the trunk" },
     ...(input.siblings > 0 ? [{ title: "Tournament", value: "tournament" as const, description: "compare sibling branches and keep one" }] : []),
   ]
 }
@@ -351,6 +388,50 @@ export type MergeInput = {
   note?: string
   /** how to confirm the record: external editor (default) or a pre-confirmed text */
   confirm?: (draft: string) => Promise<string | undefined>
+}
+
+/** Dialogs opened from an action (not from a route/palette handler), so every caller of
+ *  `mergeBranch` gets the same gate. Both resolve to "cancelled" when the stack closes. */
+function confirmDialog(ctx: ActionContext, title: string, message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    ctx.api.ui.dialog.replace(
+      () =>
+        ctx.api.ui.DialogConfirm({
+          title,
+          message,
+          onConfirm: () => {
+            resolve(true)
+            ctx.api.ui.dialog.clear()
+          },
+          onCancel: () => {
+            resolve(false)
+            ctx.api.ui.dialog.clear()
+          },
+        }),
+      () => resolve(false),
+    )
+  })
+}
+
+function promptDialog(ctx: ActionContext, title: string, placeholder?: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    ctx.api.ui.dialog.replace(
+      () =>
+        ctx.api.ui.DialogPrompt({
+          title,
+          placeholder,
+          onConfirm: (value) => {
+            resolve(value)
+            ctx.api.ui.dialog.clear()
+          },
+          onCancel: () => {
+            resolve(undefined)
+            ctx.api.ui.dialog.clear()
+          },
+        }),
+      () => resolve(undefined),
+    )
+  })
 }
 
 /** Close the branch the session lives on (DESIGN.md §6.4). Returns the parent session id. */
@@ -364,8 +445,31 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
   debug("merge.start", { mode: input.mode, sessionID: input.sessionID, parentID })
   await abortIfBusy(ctx, input.sessionID)
 
+  // both paths measure the branch by its own turns: what a squash folds into the record is
+  // also what a discard throws away — the prefix shared with the parent is neither
+  const parentMsgs = await ctx.api.client.session.messages({ sessionID: parentID, directory: ctx.directory }).catch(() => undefined)
+  const parentMessageIDs = ((parentMsgs?.data as any[]) ?? []).map((m) => String(m.info.id))
+  const own = await fetchOwnTranscript(ctx, input.sessionID)
+  const turns = ownTurnCount(own.messages, { messageID: branch.anchorMessageID, parentMessageIDs })
+
   if (input.mode === "discard") {
-    record(ctx, treeId, "branch.closed", { sessionID: input.sessionID, status: "rejected", note: input.note })
+    // discard is the one mode that lands nothing, so it gets its own gate — and a cancelled
+    // note prompt has to abort too, not fall through as "no note"
+    const ok = await confirmDialog(ctx, `Discard ⎇ ${name} (${plural(turns, "turn")})?`, DISCARD_NOTICE)
+    if (!ok) {
+      ctx.api.ui.toast({ variant: "warning", message: `⎇ ${name} kept — nothing discarded` })
+      return undefined
+    }
+    let note = input.note
+    if (note === undefined) {
+      const answer = await promptDialog(ctx, "Why? (optional note on the close marker)", "dead end")
+      if (answer === undefined) {
+        ctx.api.ui.toast({ variant: "warning", message: `⎇ ${name} kept — nothing discarded` })
+        return undefined
+      }
+      note = answer.trim() || undefined
+    }
+    record(ctx, treeId, "branch.closed", { sessionID: input.sessionID, status: "rejected", note })
     await mirrorMetadata(ctx, input.sessionID, { status: "rejected" })
     navigateToSession(ctx, parentID)
     ctx.api.ui.toast({ variant: "success", message: `⎇ ${name} discarded — back on the trunk` })
@@ -373,9 +477,6 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
   }
 
   // --- draft ---------------------------------------------------------------
-  const parentMsgs = await ctx.api.client.session.messages({ sessionID: parentID, directory: ctx.directory })
-  const parentMessageIDs = ((parentMsgs.data as any[]) ?? []).map((m) => String(m.info.id))
-  const own = await fetchOwnTranscript(ctx, input.sessionID)
   const transcript = branchTranscriptText(own, { messageID: branch.anchorMessageID, parentMessageIDs })
   const model = branch.branchModel ?? branch.trunkModel
   const modelRef = model ? { providerID: model.split("/")[0]!, modelID: model.split("/").slice(1).join("/") } : undefined
@@ -441,7 +542,26 @@ async function fetchOwnTranscript(ctx: ActionContext, sessionID: string) {
 /** Shared copy for the branch-name dialog (palette and route). */
 export const BRANCH_DIALOG = { title: "Branch here → new OpenCode session", placeholder: "name, e.g. try-redis", modelTitle: "Model for this branch (Enter keeps the current one)" }
 
+/** Where `y` lands when the terminal has no OSC 52 clipboard (relative to the project). */
+export const COPY_HINT = ".opencode/context-tree/last-copy.txt"
+
+/** `y` copy: the terminal's own clipboard through @opentui's OSC 52 (works over ssh/tmux when
+ *  the terminal allows it), falling back to `COPY_HINT`. Throws if that file cannot be written. */
+export function copyText(api: TuiPluginApi, text: string, directory: string): { target: "clipboard" | "file"; hint: string } {
+  const renderer = api.renderer as unknown as { copyToClipboardOSC52?: (text: string) => boolean } | undefined
+  // an empty selection must never wipe the user's clipboard; it still lands in the file
+  if (text && renderer?.copyToClipboardOSC52?.(text)) return { target: "clipboard", hint: "clipboard" }
+  const file = path.join(directory, COPY_HINT)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, text)
+  return { target: "file", hint: COPY_HINT }
+}
+
 /** Truncate to `max` columns with an ellipsis — the sidebar and dialogs are narrow. */
 export function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text
+}
+
+function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`
 }

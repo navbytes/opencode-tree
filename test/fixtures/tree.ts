@@ -13,8 +13,12 @@ const tick = () => (t += 1000)
 export function user(id: string, text: string): TranscriptMessage {
   return { id, role: "user", time: { created: tick() }, parts: [{ id: `${id}-p0`, type: "text", text }] }
 }
-export function assistant(id: string, opts: { text?: string; tool?: { name: string; input: unknown; output: string; ms?: number }; input?: number; output?: number }): TranscriptMessage {
+export function assistant(id: string, opts: { text?: string; think?: { text?: string; ms?: number }; tool?: { name: string; input: unknown; output: string; ms?: number }; input?: number; output?: number }): TranscriptMessage {
   const parts: TranscriptMessage["parts"] = [{ id: `${id}-ss`, type: "step-start" }]
+  if (opts.think) {
+    const start = tick()
+    parts.push({ id: `${id}-think`, type: "reasoning", text: opts.think.text ?? "weighing the options", time: { start, end: start + (opts.think.ms ?? 9800) } })
+  }
   if (opts.tool) {
     const start = tick()
     parts.push({ id: `${id}-tool`, type: "tool", tool: opts.tool.name, callID: `call-${id}`, state: { status: "completed", input: opts.tool.input, output: opts.tool.output, title: opts.tool.name, time: { start, end: start + (opts.tool.ms ?? 21) } } })

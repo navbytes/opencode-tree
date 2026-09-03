@@ -394,6 +394,12 @@ reverts it as described in 6.2–6.5, with a confirm naming what will happen
 
 ### 6.7 The gauge and the sidebar card (ambient, no panel)
 
+> **Revised after the 0.1.1 UX review.** The bands are relative to the model's context window when
+> OpenCode knows it (<25% low · <60% healthy · <85% filling · else red), with the absolute 8k / 32k /
+> 64k bands only as the fallback: 30k is "healthy" on a 200k model and one prompt from compaction on
+> a 32k one. Every surface (prompt gauge, tree header, sidebar card) shows the same string,
+> `ctx ▓▓░░░ ~2.3k/32.8k · low`, from one helper (`formatContext`).
+
 `session_prompt_right` slot: `ctx 46k/200k ▓▓▓▓░░ filling ▲+24% (bash)` coloured by
 absolute band (<8k · 8–32k · 32–64k · ≥64k), from the last assistant `tokens.input`
 (+ chars/4 for anything newer, shown as `~`), attribution = the biggest new part since
@@ -426,6 +432,14 @@ records as user messages, and can use the headless `/ctree` commands.
 ## 7. The combined tree + trajectory view
 
 ### 7.1 Can they be combined? Yes — they are two axes of one thing
+
+> **Revised after the 0.1.1 UX review.** The lanes are an *event strip*, as in DSH: one pill per
+> event on one shared axis across Input / Model / Tools, one cell of gap between neighbours (two at
+> a turn boundary in Turns mode), width proportional to duration in Duration mode, categorical
+> colours (input green / context grey, model purple, tools orange, error red), the selected step
+> inverted. Nothing is scaled by token count — height-as-magnitude produced flat or solid lanes on
+> real sessions; tokens live in the row column. When the strip does not fit, the newest events are
+> kept and the count dropped on the left is shown. `src/core/lanes.ts` `buildEventStrip`.
 
 DSH's Trajectory tab and Pi's `/tree` both render the *same* append-only event
 stream. DSH orders it by **time** and annotates each step with **cost and duration**

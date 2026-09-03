@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.0 (unreleased) — UI/UX pass from a four-lens review
+
+Findings from reviewers with lazygit/tig, k9s/btop, Helix/fzf and agent-tooling PM backgrounds,
+working from real screenshots.
+
+- Context bands are relative to the model window (<25 / 60 / 85 %), with a `▓▓░░░` bar; the
+  gauge, tree header and sidebar card show one identical string.
+- Thinking steps fold into their assistant row (`· 9.8s thought`) instead of being half the outline.
+- From inside a branch, trunk rows past the fork point are dimmed under a
+  `── not in this branch's context ──` separator: they are not sent to the model.
+- Decision records render as wrapped text (no raw `**`, no mid-word clipping).
+- Per-panel footer and scoped keys: `b`/`m`/`u` no longer fire from the help, decisions or
+  consumers panels.
+- `/` filters as you type with match highlighting, an honest zero-result state and a `4/17`
+  position; `n`/`N` step through matches.
+- Confirmations: Discard is gated and Esc cancels it; `⏎` names what it will do for the selected
+  row and confirms session switches; the merge picker names the trunk with turn and token counts.
+- Consumers show percent of the window, expand into their entries, and crop a tool result in
+  place; provider reasoning is labelled as not croppable.
+- Header dedupes the branch title and truncates to fit; crop marks survive mode changes and crop
+  mode is exclusive.
+- Keys aligned with vim: `u` undo (`x` kept), `s` consumers, `gg`/`G`, `ctrl+d`/`ctrl+u`,
+  `Tab` toggles a fold, `f` opens a filter picker (`F` reverses).
+- Lanes are an event strip like DeepSeek Harness's, not a bar chart: one pill per event on a
+  shared axis (Input / Model / Tools), a gap between neighbours, width by duration in Duration
+  mode, categorical colours, red for a failed tool call, the selected step inverted, an empty
+  lane says so, and nothing is scaled by tokens (the row column already has them).
+
 ## 0.1.1 — 2026-09-03
 
 - Install with OpenCode's own `opencode plugin opencode-context-tree [-g]`, which registers

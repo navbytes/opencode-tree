@@ -8,7 +8,7 @@ import { Show, createEffect, createMemo, createSignal, on } from "solid-js"
 import { bandFor, contextSizeOf, formatContext, formatK, type MinimalMessage, type MinimalPart } from "../core/tokens.js"
 import { JournalStore, type StorageMode } from "../shared/store.js"
 import { debug } from "../shared/debug.js"
-import { BRANCH_DIALOG, MERGE_TRUST, bumpJournal, clip, createNamedBranch, journalRevision, mergeBranch, mergeDialogOptions, mergeDialogTitle, setLabel, type MergeMode } from "./actions.js"
+import { BRANCH_DIALOG, MERGE_TRUST, TRUNK_LABEL, bumpJournal, clip, createNamedBranch, journalRevision, mergeBranch, mergeDialogOptions, mergeDialogTitle, mergeTargetOf, ownTurnCount, setLabel, type MergeMode } from "./actions.js"
 import { openSiblings } from "../core/decision.js"
 import { hasEditor } from "./editor.js"
 import { TreeRoute } from "./route.js"
@@ -228,12 +228,16 @@ const tui: TuiPlugin = async (api, rawOptions) => {
             api.ui.toast({ message: "not on an open branch — /branch first" })
             return
           }
+          // the parent is usually not the loaded session, so its turn/token figures come over the SDK
+          const parent = await fetchTranscript(api, branch.parentSessionID, directory).catch(() => undefined)
+          const parentLabel = branch.parentSessionID === state.root ? TRUNK_LABEL : (state.sessions[branch.parentSessionID]?.name ?? TRUNK_LABEL)
+          const turns = ownTurnCount(api.state.session.messages(sessionID), { messageID: branch.anchorMessageID, parentMessageIDs: parent?.messages.map((m) => m.id) ?? [] })
           const mode = await new Promise<MergeMode | undefined>((resolve) => {
             api.ui.dialog.replace(
               () =>
                 api.ui.DialogSelect<MergeMode>({
-                  title: mergeDialogTitle(branch.name ?? "branch", api.state.session.get(branch.parentSessionID)?.title),
-                  options: mergeDialogOptions({ siblings: openSiblings(state, sessionID).length }),
+                  title: mergeDialogTitle(branch.name ?? "branch", parent ? mergeTargetOf(parentLabel, parent.messages) : undefined),
+                  options: mergeDialogOptions({ siblings: openSiblings(state, sessionID).length, turns }),
                   onSelect: (o) => {
                     resolve(o.value)
                     api.ui.dialog.clear()
@@ -314,6 +318,9 @@ const tui: TuiPlugin = async (api, rawOptions) => {
           return store.stateForSession(props.session_id)
         })
         const branch = () => st()?.sessions[props.session_id]
+        // the gauge's own string, so the card and the prompt line never show two numbers
+        const size = createMemo(() => contextSizeOf(toMinimalMessages(api.state.session.messages(props.session_id), api.state.part)))
+        const limit = createMemo(() => modelContextLimit(api, props.session_id))
         const crops = () => st()?.activeCrops(props.session_id) ?? []
         const hidden = () => crops().reduce((s, c) => s + c.targets.reduce((x, y) => x + y.estTokens, 0), 0)
         const siblings = () => Object.values(st()?.sessions ?? {}).filter((b) => b.parentSessionID === props.session_id && b.status === "open").length
@@ -334,6 +341,7 @@ const tui: TuiPlugin = async (api, rawOptions) => {
               <text fg={t.success}>{`⎇ ${branchLabel(api, props.session_id, branch()!.name, CARD_COLUMNS - 2)}`}</text>
               <text fg={t.textMuted}>{status()}</text>
             </Show>
+            <text fg={t[BAND_COLOR[bandFor(size().tokens, limit())]]}>{formatContext(size(), limit())}</text>
             <Show when={crops().length}>
               <text fg={t.warning}>{`✂ ${crops().length} crop${crops().length === 1 ? "" : "s"} · ~${formatK(hidden())} hidden`}</text>
             </Show>
@@ -344,13 +352,13 @@ const tui: TuiPlugin = async (api, rawOptions) => {
       session_prompt_right: (_ctx, props: { session_id: string }) => {
         const t = api.theme.current
         const size = createMemo(() => contextSizeOf(toMinimalMessages(api.state.session.messages(props.session_id), api.state.part)))
-        const band = () => bandFor(size().tokens)
         const branch = () => {
           journalRevision() // the journal is plain files: without the revision `⎇ name` never refreshes
           return store.stateForSession(props.session_id)?.sessions[props.session_id]
         }
-        // model context limit + compaction reserve, for the guard (DESIGN.md §6.7)
+        // model context limit + compaction reserve, for the bands and the guard (DESIGN.md §6.7)
         const limit = createMemo(() => modelContextLimit(api, props.session_id))
+        const band = () => bandFor(size().tokens, limit())
         const reserve = () => (api.state.config as { compaction?: { reserved?: number } }).compaction?.reserved ?? 16_384
         // trend + attribution: an effect compares each new size with the previous one
         // (side effects and closure state stay out of the memo graph)
@@ -401,7 +409,7 @@ const tui: TuiPlugin = async (api, rawOptions) => {
           const b = band()
           if (b === "red" && !redNudged) {
             redNudged = true
-            api.ui.toast({ variant: "warning", message: "context is in the red band (≥64k) — consider /tree → c crop, or /merge a branch", duration: 6000 })
+            api.ui.toast({ variant: "warning", message: `context is in the red band (${limit() ? "≥85% of the window" : "≥64k"}) — consider /tree → c crop, or /merge a branch`, duration: 6000 })
           } else if (b === "low" || b === "healthy") redNudged = false
           const lim = limit()
           if (lim && size().tokens >= lim - reserve() && !guardNudged) {

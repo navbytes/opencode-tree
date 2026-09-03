@@ -5,7 +5,12 @@ import { foldJournal, type JournalEntry } from "../src/core/journal.js"
 import { buildTreeView, type Row } from "../src/core/tree.js"
 import { assistant, buildFixture, buildOffPathFixture, copyPrefix, EARLY, LATE, OPEN, SQUASHED, TRUNK, user } from "./fixtures/tree.js"
 
-const shape = (rows: Row[]) => rows.map((r) => (r.kind === "branch" ? `${r.gutter}${r.name}` : r.kind === "turn" ? `T${r.turn}` : `${r.gutter}${r.glyph}`))
+const shape = (rows: Row[]) =>
+  rows.map((r) => (r.kind === "branch" ? `${r.gutter}${r.name}` : r.kind === "separator" ? "┈" : r.kind === "turn" ? `T${r.turn}` : `${r.gutter}${r.glyph}`))
+
+/** the rows that own a message — branch headers and separators do not */
+const owned = (r: Row): r is Extract<Row, { kind: "turn" | "step" }> => r.kind === "turn" || r.kind === "step"
+const isSeparator = (r: Row): r is Extract<Row, { kind: "separator" }> => r.kind === "separator"
 
 describe("buildTreeView from the trunk", () => {
   const f = buildFixture()
@@ -23,7 +28,7 @@ describe("buildTreeView from the trunk", () => {
   test("step rows: tool step has duration, warn flag for ≥10k, ids include owning session", () => {
     const tool = view.rows.find((r) => r.kind === "step" && r.glyph === "⚙")!
     expect(tool.kind === "step" && tool.durationMs).toBe(21)
-    expect(tool.sessionID).toBe(TRUNK)
+    expect(tool.kind === "step" && tool.sessionID).toBe(TRUNK)
     expect(tool.id.startsWith(`${TRUNK}:a1:`)).toBe(true)
     expect(tool.kind === "step" && tool.warn).toBe(false)
   })
@@ -62,7 +67,7 @@ describe("buildTreeView expanded + from a branch", () => {
     const view = buildTreeView({ state: f.state, transcripts: f.transcripts, currentSessionID: TRUNK, expanded: new Set([OPEN]), filter: "default" })
     expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "├⎇try-redis", "╰⎇fix-flaky-test", "T3", "│ ⚙", "│ ○", "T4", "│ ○", "T3", "○"])
     const nested = view.rows.filter((r) => r.depth === 1)
-    expect(nested.every((r) => r.sessionID === OPEN)).toBe(true)
+    expect(nested.every((r) => owned(r) && r.sessionID === OPEN)).toBe(true)
     // the branch's own rows use the branch's message IDs, not the copied prefix
     expect(nested.find((r) => r.kind === "turn")!.messageID).toBe("om1")
   })
@@ -70,25 +75,25 @@ describe("buildTreeView expanded + from a branch", () => {
     const view = buildTreeView({ state: f.state, transcripts: f.transcripts, currentSessionID: OPEN, expanded: new Set(), filter: "default" })
     // the branch you are on is open (on the current path), its rows nested; the trunk keeps
     // going after the fork (m3/a3) and is drawn inline, and try-redis stays folded at the anchor
-    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "├⎇try-redis", "╰⎇fix-flaky-test", "T3", "│ ⚙", "│ ○", "T4", "│ ○", "T3", "○"])
+    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "├⎇try-redis", "╰⎇fix-flaky-test", "T3", "│ ⚙", "│ ○", "T4", "│ ○", "┈", "T3", "○"])
     const marker = view.rows.find((r) => r.kind === "branch" && r.isCurrent)!
     expect(marker.kind === "branch" && [marker.name, marker.turns, marker.expanded]).toEqual(["fix-flaky-test", 2, true])
     expect(view.rows.filter((r) => r.kind === "branch" && r.sessionID === OPEN).length).toBe(1)
     const t1 = view.rows[0]!
-    expect(t1.sessionID).toBe(TRUNK)
+    expect(owned(t1) && t1.sessionID).toBe(TRUNK)
     expect(t1.kind === "turn" && t1.messageID).toBe("m1")
     const t3 = view.rows.find((r) => r.kind === "turn" && r.turn === 3)!
-    expect(t3.sessionID).toBe(OPEN)
+    expect(owned(t3) && t3.sessionID).toBe(OPEN)
     expect(t3.kind === "turn" && t3.messageID).toBe("om1")
     expect(view.totalTokens).toBe(6012) // oa2's tokens.input + its own tokens.output
     // currentRowId is the current session's tip — the last OPEN row, not the trunk's tail
-    const openTip = view.rows.filter((r) => r.kind !== "branch" && r.sessionID === OPEN).at(-1)!
+    const openTip = view.rows.filter((r) => owned(r) && r.sessionID === OPEN).at(-1)!
     expect(view.currentRowId).toBe(openTip.id)
   })
   test("a fork with no messages of its own is still visible, and is where the cursor lands", () => {
     const prefixOnly = { ...f.transcripts[OPEN]!, messages: f.transcripts[OPEN]!.messages.slice(0, 4) }
     const view = buildTreeView({ state: f.state, transcripts: { ...f.transcripts, [OPEN]: prefixOnly }, currentSessionID: OPEN, expanded: new Set(), filter: "default" })
-    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "├⎇try-redis", "╰⎇fix-flaky-test", "T3", "○"])
+    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "├⎇try-redis", "╰⎇fix-flaky-test", "┈", "T3", "○"])
     const marker = view.rows.find((r) => r.kind === "branch" && r.isCurrent)!
     expect(marker.kind === "branch" && [marker.turns, marker.tokens]).toEqual([0, 0])
     expect(view.currentRowId).toBe(marker.id)
@@ -96,7 +101,7 @@ describe("buildTreeView expanded + from a branch", () => {
   test("a filter that hides branches keeps only the current path, flat and un-indented", () => {
     const view = buildTreeView({ state: f.state, transcripts: f.transcripts, currentSessionID: OPEN, expanded: new Set(), filter: "user-only" })
     // trunk turns T1/T2, the current branch's own turns T3/T4, and the trunk's own last turn
-    expect(shape(view.rows)).toEqual(["T1", "T2", "T3", "T4", "T3"])
+    expect(shape(view.rows)).toEqual(["T1", "T2", "T3", "T4", "┈", "T3"])
     expect(view.rows.every((r) => r.gutter === "")).toBe(true)
   })
 })
@@ -131,7 +136,7 @@ describe("branches off the rendered path", () => {
   test("the whole tree is drawn from the root: your branch open, siblings folded at their own anchors", () => {
     // `early` forked at a2 (open, on the path); the trunk keeps going to T3/a3; `late` forked
     // at a3 so it now hangs off the trunk's own T3, folded — no separate 'elsewhere' group
-    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "╰⎇early", "T3", "│ ○", "T3", "○", "╰⎇late"])
+    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "╰⎇early", "T3", "│ ○", "┈", "T3", "○", "╰⎇late"])
     const branches = view.rows.filter((r) => r.kind === "branch")
     expect(branches.map((r) => r.kind === "branch" && [r.name, r.status, r.turns, r.isCurrent])).toEqual([
       ["early", "open", 1, true],
@@ -151,7 +156,7 @@ describe("branches off the rendered path", () => {
   test("expanding a folded sibling shows its post-fork turns inline under its own anchor", () => {
     const expanded = buildTreeView({ state: f.state, transcripts: f.transcripts, currentSessionID: EARLY, expanded: new Set([LATE]), filter: "default" })
     expect(shape(expanded.rows).slice(-3)).toEqual(["╰⎇late", "T4", "│ ○"])
-    expect(expanded.rows.at(-1)!.sessionID).toBe(LATE)
+    expect(expanded.rows.filter(owned).at(-1)!.sessionID).toBe(LATE)
   })
   test("nothing is duplicated when every branch is already on the path", () => {
     const g = buildFixture()
@@ -176,8 +181,8 @@ describe("a fork of a fork", () => {
   const view = buildTreeView({ state, transcripts, currentSessionID: DEEP, expanded: new Set(), filter: "default" })
 
   test("the fork-of-fork nests: fix-flaky-test one level in, deeper two, gutters and ids consistent", () => {
-    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "╰⎇fix-flaky-test", "T3", "│ ⚙", "│ ○", "│ ╰⎇deeper", "T4", "│ │ ○", "T4", "│ ○", "T3", "○"])
-    expect(view.rows.filter((r) => r.kind === "branch" && r.isCurrent).map((r) => r.sessionID)).toEqual([DEEP])
+    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "╰⎇fix-flaky-test", "T3", "│ ⚙", "│ ○", "│ ╰⎇deeper", "T4", "│ │ ○", "┈", "T4", "│ ○", "┈", "T3", "○"])
+    expect(view.rows.filter((r) => r.kind === "branch" && r.isCurrent).map((r) => (r.kind === "branch" ? r.sessionID : ""))).toEqual([DEEP])
     expect(new Set(view.rows.map((r) => r.id)).size).toBe(view.rows.length)
     // gutter connectors carry the topology: deeper's header rides the open fix-flaky-test spine
     // (one │), and its own rows carry two │ levels
@@ -185,7 +190,7 @@ describe("a fork of a fork", () => {
     expect(deeper.gutter).toBe("│ ╰⎇")
     expect(view.rows.filter((r) => r.kind === "step" && r.sessionID === DEEP).every((r) => r.gutter === "│ │ ")).toBe(true)
     // currentRowId is DEEP's tip (its last own row) — the route marks it `← here`
-    const deepTip = view.rows.filter((r) => r.kind !== "branch" && r.sessionID === DEEP).at(-1)!
+    const deepTip = view.rows.filter((r) => owned(r) && r.sessionID === DEEP).at(-1)!
     expect(view.currentRowId).toBe(deepTip.id)
   })
 })
@@ -211,7 +216,7 @@ describe("the current session survives an unloaded on-path ancestor (P0)", () =>
     test(`OPEN ${label}: DEEP's own rows and cursor still render, without replaying the prefix`, () => {
       const transcripts = { [TRUNK]: f.transcripts[TRUNK]!, [DEEP]: withDeep, ...(openTr ? { [OPEN]: openTr } : {}) }
       const view = buildTreeView({ ...base, transcripts })
-      const deepRows = view.rows.filter((r) => r.kind !== "branch" && r.sessionID === DEEP)
+      const deepRows = view.rows.filter((r) => owned(r) && r.sessionID === DEEP)
       expect(deepRows.length).toBeGreaterThan(0)
       expect(view.currentRowId).toBe(deepRows.at(-1)!.id)
       // DEEP fills the gap the unloaded OPEN left with its own copies (T3/T4), never the trunk's T1/T2
@@ -219,13 +224,13 @@ describe("the current session survives an unloaded on-path ancestor (P0)", () =>
       // its rows still nest under the headers-only OPEN spine (two gutter levels)
       expect(deepRows.every((r) => r.gutter.startsWith("│ │ "))).toBe(true)
       // OPEN itself contributes only a placeholder header, no rows of its own
-      expect(view.rows.some((r) => r.kind !== "branch" && r.sessionID === OPEN)).toBe(false)
+      expect(view.rows.some((r) => owned(r) && r.sessionID === OPEN)).toBe(false)
     })
   }
 
   test("every transcript present is the control: same current tip", () => {
     const view = buildTreeView({ ...base, transcripts: { ...f.transcripts, [DEEP]: withDeep } })
-    const deepTip = view.rows.filter((r) => r.kind !== "branch" && r.sessionID === DEEP).at(-1)!
+    const deepTip = view.rows.filter((r) => owned(r) && r.sessionID === DEEP).at(-1)!
     expect(view.currentRowId).toBe(deepTip.id)
   })
 })
@@ -255,10 +260,10 @@ describe("an unresolvable anchor never replays the copied prefix (P2)", () => {
     const mid = view.rows.find((r) => r.kind === "branch" && r.sessionID === MID)!
     expect(mid.kind === "branch" && mid.turns).toBe(0)
     // the bug sliced from 0, replaying MID's whole copied prefix as its own turns — it must not
-    expect(view.rows.some((r) => r.kind !== "branch" && r.sessionID === MID)).toBe(false)
+    expect(view.rows.some((r) => owned(r) && r.sessionID === MID)).toBe(false)
     // the current session hanging off it is still reached
     expect(view.currentRowId).toBeDefined()
-    expect(view.rows.some((r) => r.kind !== "branch" && r.sessionID === CUR)).toBe(true)
+    expect(view.rows.some((r) => owned(r) && r.sessionID === CUR)).toBe(true)
   })
 
   test('a branch forked before the parent\'s first message (anchor "") still shows its whole tail', () => {
@@ -279,7 +284,7 @@ describe("an unresolvable anchor never replays the copied prefix (P2)", () => {
     const b = view.rows.find((r) => r.kind === "branch" && r.sessionID === B)!
     // no shared prefix, so its whole transcript is legitimately its own tail (slice from 0 is right here)
     expect(b.kind === "branch" && b.turns).toBe(1)
-    expect(view.rows.filter((r) => r.kind !== "branch" && r.sessionID === B).length).toBe(2)
+    expect(view.rows.filter((r) => owned(r) && r.sessionID === B).length).toBe(2)
   })
 })
 
@@ -303,7 +308,7 @@ describe("headless /ctree command turns", () => {
     expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "├⎇try-redis", "╰⎇fix-flaky-test", "T3", "○", "T4", "○"])
     const t4 = view.rows.find((r) => r.kind === "turn" && r.turn === 4)!
     expect(t4.kind === "turn" && t4.messageID).toBe("m4")
-    expect(view.rows.some((r) => r.kind !== "branch" && (r.messageID === "cm" || r.messageID === "ca"))).toBe(false)
+    expect(view.rows.some((r) => owned(r) && (r.messageID === "cm" || r.messageID === "ca"))).toBe(false)
   })
   test("`all` keeps it, so the plumbing stays inspectable", () => {
     const rows = buildTreeView({ ...midway, filter: "all" }).rows
@@ -340,5 +345,76 @@ describe("filters, search, labels, crops", () => {
     const view = buildTreeView({ ...base, filter: "default", crops: [{ messageID: "a1", partID: "a1-tool" }] })
     const tool = view.rows.find((r) => r.kind === "step" && r.glyph === "⚙")!
     expect(tool.kind === "step" && tool.isCropped).toBe(true)
+  })
+})
+
+describe("thinking parts collapse into the step they belong to", () => {
+  const messages = [
+    user("k1u", "why does it flake?"),
+    assistant("k1a", { think: { ms: 9800 }, tool: { name: "bash", input: { command: "bun test" }, output: "3 failed" }, text: "a timing assumption", input: 100, output: 40 }),
+    user("k2u", "and now?"),
+    assistant("k2a", { think: { ms: 1200 }, input: 200, output: 10 }),
+  ]
+  const transcripts = { [TRUNK]: { sessionID: TRUNK, title: "flake", status: "available" as const, messages } }
+  const base = { state: foldJournal([], "t_think"), transcripts, currentSessionID: TRUNK, expanded: new Set<string>() }
+  const stepTokens = (rows: Row[], partID: string) => rows.filter(owned).find((r) => r.kind === "step" && r.partID === partID)?.tokens
+
+  test("no reasoning row outside `all`: the duration rides the message's first real step", () => {
+    const rows = buildTreeView({ ...base, filter: "default" }).rows
+    expect(shape(rows)).toEqual(["T1", "⚙", "○", "T2", "○"])
+    expect(rows.some((r) => r.kind === "step" && r.partID === "k1a-think")).toBe(false)
+    const first = rows.find((r) => r.kind === "step" && r.messageID === "k1a")!
+    expect(first.kind === "step" && [first.partID, first.thinkingMs]).toEqual(["k1a-tool", 9800])
+    // exactly one row carries it, so the route appends `· 9.8s thought` once per message
+    expect(rows.filter((r) => r.kind === "step" && r.thinkingMs !== undefined).length).toBe(1)
+  })
+  test("a message that is nothing but thinking keeps one row, timed for the whole message", () => {
+    const only = buildTreeView({ ...base, filter: "default" }).rows.filter((r) => r.kind === "step" && r.messageID === "k2a")
+    expect(only.length).toBe(1)
+    expect(only[0]!.kind === "step" && [only[0]!.preview, only[0]!.durationMs]).toEqual(["(thinking)", 1200])
+  })
+  test("`all` keeps the separate reasoning rows, unfolded", () => {
+    const rows = buildTreeView({ ...base, filter: "all" }).rows
+    expect(rows.some((r) => r.kind === "step" && r.partID === "k1a-think")).toBe(true)
+    expect(rows.every((r) => r.kind !== "step" || r.thinkingMs === undefined)).toBe(true)
+  })
+  test("token math is untouched: only the rows changed", () => {
+    const collapsed = buildTreeView({ ...base, filter: "default" })
+    const all = buildTreeView({ ...base, filter: "all" })
+    expect(stepTokens(collapsed.rows, "k1a-text")).toBe(stepTokens(all.rows, "k1a-text"))
+    expect(stepTokens(collapsed.rows, "k1a-tool")).toBe(stepTokens(all.rows, "k1a-tool"))
+    expect(collapsed.totalTokens).toBe(all.totalTokens)
+  })
+})
+
+describe("rows the current session does not send are marked and divided", () => {
+  const f = buildFixture()
+  const base = { state: f.state, transcripts: f.transcripts, expanded: new Set<string>(), filter: "default" as const }
+  const fromBranch = buildTreeView({ ...base, currentSessionID: OPEN })
+
+  test("from a branch: one separator, and the trunk's rows past the fork are out of context", () => {
+    const seps = fromBranch.rows.filter(isSeparator)
+    expect(seps.length).toBe(1)
+    expect(seps[0]!.text).toBe("── not in this branch's context ──")
+    // drawn in the ancestor it leaves, so it sits at the ancestor's depth
+    expect([seps[0]!.depth, seps[0]!.gutter]).toEqual([0, ""])
+    const at = fromBranch.rows.indexOf(seps[0]!)
+    expect(fromBranch.rows.slice(0, at).filter(owned).every((r) => r.inContext)).toBe(true)
+    expect(fromBranch.rows.slice(at + 1).filter(owned).map((r) => [r.sessionID, r.inContext])).toEqual([
+      [TRUNK, false],
+      [TRUNK, false],
+    ])
+  })
+  test("from the trunk: everything on screen is in context, and nothing is divided", () => {
+    const view = buildTreeView({ ...base, currentSessionID: TRUNK })
+    expect(view.rows.some(isSeparator)).toBe(false)
+    expect(view.rows.filter(owned).every((r) => r.inContext)).toBe(true)
+  })
+  test("another branch's rows are never in context, expanded or not", () => {
+    const view = buildTreeView({ ...base, currentSessionID: TRUNK, expanded: new Set([OPEN]) })
+    const other = view.rows.filter(owned).filter((r) => r.sessionID === OPEN)
+    expect(other.length).toBeGreaterThan(0)
+    expect(other.some((r) => r.inContext)).toBe(false)
+    expect(view.rows.some(isSeparator)).toBe(false)
   })
 })

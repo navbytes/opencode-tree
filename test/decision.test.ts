@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { branchTranscriptText, buildDecisionDraftPrompt, decisionMessageText, decisionTemplate, exportDecisions, openSiblings } from "../src/core/decision.js"
+import { branchTranscriptText, buildDecisionDraftPrompt, decisionMessageText, decisionSummary, decisionTemplate, exportDecisions, openSiblings, renderDecision } from "../src/core/decision.js"
 import { buildFixture, OPEN, SQUASHED, TRUNK } from "./fixtures/tree.js"
 
 describe("decision records", () => {
@@ -37,5 +37,37 @@ describe("decision records", () => {
   test("export heads every record with its branch, date and session", () => {
     const md = exportDecisions([{ branchName: "a", text: "◆ ## Decision: a\nx", sessionID: "ses_1", at: Date.parse("2026-09-02T10:11:12Z") }])
     expect(md).toBe("# Decisions\n\n## ⎇ a · 2026-09-02T10:11:12.000Z\n_session ses_1_\n\nx\n")
+  })
+})
+
+describe("rendering a record", () => {
+  const RECORD = `◆ ## Decision: try-redis
+**Date:** 2026-09-02 · **Model:** mock/mock-b · **Branch:** try-redis
+**Outcome:** Keep the in-memory cache; Redis is overkill here.
+**Why:**
+- the working set is \`~4 MB\`, well inside the process
+- an extra service makes CI **flaky**
+
+### Rejected alternatives
+- **redis:** one more container to boot on every CI run
+`
+
+  test("emphasis and heading markers go, bullets and paragraph breaks stay, lines fit the width", () => {
+    const lines = renderDecision(RECORD, 40)
+    expect(lines.every((l) => l.length <= 40)).toBe(true)
+    expect(lines[0]).toBe("◆ Decision: try-redis")
+    expect(lines.some((l) => l.includes("*") || l.includes("`") || l.includes("#"))).toBe(false)
+    expect(lines).toContain("") // the blank line before "Rejected alternatives"
+    expect(lines).toContain("Rejected alternatives")
+    // a wrapped bullet keeps its marker and hangs its continuation under the text
+    expect(lines).toContain("- the working set is ~4 MB, well inside")
+    expect(lines).toContain("  the process")
+  })
+  test("only a token too long for the line is cut, and it is marked", () => {
+    expect(renderDecision(`- ${"x".repeat(50)}`, 20)).toEqual([`- ${"x".repeat(17)}…`])
+  })
+  test("summary pulls the title and the outcome for a one-line row", () => {
+    expect(decisionSummary(RECORD)).toEqual({ title: "try-redis", outcome: "Keep the in-memory cache; Redis is overkill here." })
+    expect(decisionSummary("scratch notes\nno template here")).toEqual({ title: "scratch notes" })
   })
 })

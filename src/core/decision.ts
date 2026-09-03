@@ -75,6 +75,68 @@ export function decisionMessageText(record: string, branchName: string): string 
   return body.startsWith("## Decision:") ? `◆ ${body}` : `◆ ## Decision: ${branchName}\n${body}`
 }
 
+// ---------------------------------------------------------------------------
+// Rendering a record in the TUI (DESIGN.md §7.4's ◆ cards).
+// ---------------------------------------------------------------------------
+
+const BULLET = /^(\s*)[-*•]\s+/
+/** the `◆` a landed record carries survives; the `#` markers do not */
+const HEADING = /^(\s*(?:◆\s*)?)#{1,6}\s*/
+
+/** Markdown emphasis is noise in a terminal; bullets and blank lines are structure. */
+function stripMarkdown(text: string): string {
+  return text.replace(/[*`]/g, "")
+}
+
+function wrapLine(body: string, width: number, marker: string): string[] {
+  const room = Math.max(1, width - marker.length)
+  const indent = " ".repeat(marker.length)
+  const lines: string[] = []
+  let current = ""
+  for (const raw of body.split(/\s+/).filter(Boolean)) {
+    // the only mid-word cut: one token that cannot fit on a line of its own
+    const word = raw.length > room ? `${raw.slice(0, Math.max(1, room - 1))}…` : raw
+    if (current === "") current = word
+    else if (current.length + 1 + word.length <= room) current += ` ${word}`
+    else {
+      lines.push(current)
+      current = word
+    }
+  }
+  lines.push(current)
+  return lines.map((line, i) => `${i === 0 ? marker : indent}${line}`.trimEnd())
+}
+
+/** A decision record as terminal lines: emphasis and heading markers gone, list bullets and
+ *  paragraph breaks kept, every line word-wrapped to `width` with a hanging indent. */
+export function renderDecision(text: string, width: number): string[] {
+  const out: string[] = []
+  for (const raw of text.replace(/\r/g, "").trim().split("\n")) {
+    const line = raw.trimEnd()
+    if (line.trim() === "") {
+      if (out.length > 0 && out[out.length - 1] !== "") out.push("")
+      continue
+    }
+    const bullet = BULLET.exec(line)
+    const marker = bullet ? `${bullet[1]}- ` : ""
+    const body = stripMarkdown(bullet ? line.slice(bullet[0].length) : line.replace(HEADING, "$1"))
+    out.push(...wrapLine(body, width, marker))
+  }
+  return out
+}
+
+/** The one-line form of a record: its `## Decision: <name>` title and `Outcome:` line. */
+export function decisionSummary(text: string): { title: string; outcome?: string } {
+  const lines = text
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((l) => stripMarkdown(l.replace(/^\s*◆\s*/, "").replace(HEADING, "$1").replace(BULLET, "")).trim())
+  const heading = lines.find((l) => /^Decision:\s*\S/i.test(l))
+  const title = heading ? heading.replace(/^Decision:\s*/i, "").trim() : (lines.find((l) => l !== "") ?? "")
+  const outcome = lines.find((l) => /^Outcome:\s*\S/i.test(l))?.replace(/^Outcome:\s*/i, "").trim()
+  return outcome ? { title, outcome } : { title }
+}
+
 /** Open sibling branches forked from the same point (tournament, DESIGN.md §6.4). */
 export function openSiblings(state: TreeState, sessionID: string): string[] {
   const me = state.sessions[sessionID]

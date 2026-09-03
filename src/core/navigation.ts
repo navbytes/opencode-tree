@@ -6,14 +6,37 @@
  */
 import type { Filter, Row, TreeView } from "./tree.js"
 
-/** Move the selection by `delta` rows, clamped to the row list's bounds.
+/** First row at or after `index` scanning in `dir` that the cursor may sit on — separator rows
+ *  are decoration (`── not in this branch's context ──`). -1 when there is none. */
+function scan(rows: Row[], index: number, dir: 1 | -1): number {
+  for (let i = index; i >= 0 && i < rows.length; i += dir) if (rows[i]!.kind !== "separator") return i
+  return -1
+}
+
+/** Move the selection by `delta` selectable rows, clamped to the row list's bounds.
  *  Returns -1 for an empty row list. */
 export function moveSelection(rows: Row[], index: number, delta: number): number {
   if (rows.length === 0) return -1
-  const next = index + delta
-  if (next < 0) return 0
-  if (next > rows.length - 1) return rows.length - 1
-  return next
+  const dir: 1 | -1 = delta < 0 ? -1 : 1
+  let i = Math.min(Math.max(index, 0), rows.length - 1)
+  for (let step = Math.abs(delta); step > 0; step--) {
+    const next = scan(rows, i + dir, dir)
+    if (next === -1) break
+    i = next
+  }
+  if (rows[i]!.kind !== "separator") return i
+  // the cursor started on a separator (a rebuilt view moved it there): step off it either way
+  const ahead = scan(rows, i, dir)
+  return ahead === -1 ? scan(rows, i, dir === 1 ? -1 : 1) : ahead
+}
+
+/** First / last selectable row (`g` / `G`). -1 when there is none. */
+export function firstIndex(rows: Row[]): number {
+  return scan(rows, 0, 1)
+}
+
+export function lastIndex(rows: Row[]): number {
+  return scan(rows, rows.length - 1, -1)
 }
 
 /** The next/previous `branch` row from `index` in direction `dir` (DESIGN.md §7.2's
@@ -65,31 +88,37 @@ export function resolveSelection(
   previousIndex?: number,
 ): number {
   if (view.rows.length === 0) return -1
+  // the cursor never rests on a separator: take the next real row, else the previous one
+  const land = (i: number) => {
+    const ahead = scan(view.rows, i, 1)
+    return ahead === -1 ? scan(view.rows, i, -1) : ahead
+  }
 
   if (preferredId !== undefined) {
     const exact = view.indexById[preferredId]
-    if (exact !== undefined) return exact
+    if (exact !== undefined) return land(exact)
 
     const owner = preferredId.split(":").slice(0, 2).join(":")
     for (let i = 0; i < view.rows.length; i++) {
       const row = view.rows[i]!
+      if (row.kind === "separator") continue
       const rowOwner = row.kind === "branch" ? row.id : `${row.sessionID}:${row.messageID}`
       if (rowOwner === owner) return i
     }
   }
 
   // 2b. the row that now sits where the old selection was (filter/fold changed the list)
-  if (previousIndex !== undefined && previousIndex >= 0) return Math.min(previousIndex, view.rows.length - 1)
+  if (previousIndex !== undefined && previousIndex >= 0) return land(Math.min(previousIndex, view.rows.length - 1))
 
   if (currentRowId !== undefined) {
     const idx = view.indexById[currentRowId]
-    if (idx !== undefined) return idx
+    if (idx !== undefined) return land(idx)
   }
 
   if (view.currentRowId !== undefined) {
     const idx = view.indexById[view.currentRowId]
-    if (idx !== undefined) return idx
+    if (idx !== undefined) return land(idx)
   }
 
-  return 0
+  return land(0)
 }

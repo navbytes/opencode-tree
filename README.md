@@ -58,7 +58,7 @@ is one content-forward row and branches are drawn at their fork points:
 │ │ ● user: the bun test is flaky, find the race                                             ~0.4k
 │ │ ⚙ [bash $ bun test src/foo.test.ts] ⚠                                                     ~4.7k
 │ ◆ Decision: try-redis · Outcome: switched to a write-through cache…                         ~0.9k
-└ ⏎ go  b branch  m merge  c crop  i inspector  1·2·3 lanes  x undo  ? help  q back
+└ ⏎ go  b branch  m merge  c crop  u undo  s consumers  ? help  q back
 ```
 
 Every message and tool call is a row; the gutter draws each branch at the message it was forked
@@ -70,37 +70,34 @@ OpenCode's own `/fork` are adopted into the tree automatically.
 
 ## Screenshots
 
-Real OpenCode 1.18 TUI, gemma4 via ollama. `/tree` opens as a Pi-style outline of the whole
-session tree: one content-forward row per message and tool step (`● user:` / `○ assistant:` /
-`⚙ [bash $ …]`), branches drawn at their fork points with `│ ├ ╰` connectors and folded to their
-`⎇` header until you open them. Here a trunk about caching a `/users` endpoint has a squashed
-`try-redis` branch (its ◆ decision record is the leaf), a rejected `try-lru`, and two native
-`/fork` sessions:
+Real OpenCode 1.18 TUI, gemma4 via ollama. `/tree` is a Pi-style outline of the whole session
+tree: one row per message or tool step, thinking folded into its assistant row, branches drawn at
+their fork points and folded to their `⎇` header until opened, the context bar and band in the
+header, and a footer that says what `⏎` will do for the selected row:
 
 ![tree from the trunk](docs/screenshots/tree-trunk.png)
 
-The DeepSeek-Harness trajectory is one keystroke away, not gone: `i` opens the inspector and
-`1/2/3` bring in the Input/Model/Tools lanes:
-
-![tree with the trajectory panels on](docs/screenshots/tree-trajectory.png)
-
-From inside a branch, `← here` marks your current step, that branch is expanded, and the rest of
-the tree stays visible and folded — you always see the whole tree:
+From inside a branch, `← here` marks your step and the trunk rows past the fork point are dimmed
+under `── not in this branch's context ──`: they are not sent to the model.
 
 ![tree from a branch](docs/screenshots/tree-from-a-branch.png)
 
-`→` expands a branch inline (its turns continue the numbering from the fork point):
+`/` filters as you type, highlights matches and counts rows; `n`/`N` step through them:
 
-![a branch expanded inline](docs/screenshots/tree-expanded.png)
+![live search](docs/screenshots/search.png)
 
-`D` decisions · `u` what's filling the context · `?` help · `m` merge · the sidebar card:
+The DeepSeek-Harness trajectory is one keystroke away: `1/2/3` bring in the event-strip lanes
+(one pill per event, width by duration, red for a failed tool call) and `i` the inspector:
+
+![tree with the trajectory lanes on](docs/screenshots/tree-trajectory.png)
+
+`s` shows what is filling the context, by share of the tree and of the model window, expandable
+into entries you can crop in place; `D` renders the decision records; `?` opens the help pane:
 
 | | |
 |---|---|
-| ![decisions](docs/screenshots/decisions.png) | ![consumers](docs/screenshots/consumers.png) |
+| ![consumers](docs/screenshots/consumers.png) | ![decisions](docs/screenshots/decisions.png) |
 | ![help](docs/screenshots/help.png) | ![merge picker](docs/screenshots/merge-picker.png) |
-
-![sidebar card](docs/screenshots/sidebar-card.png)
 
 ## Try it from source
 
@@ -110,11 +107,12 @@ bun install && bun run build
 # tui.json       →  "plugin": ["/abs/path/opencode-tree/dist/tui.js"]
 ```
 
-The footer inside `/tree` carries six keys — `⏎` go, `b` branch, `m` merge, `c` crop,
-`x` undo, `q` back — and `?` opens a help overlay with the rest: crop mode (`space` mark,
-double for protected, `a` auto, `t` result⇄turn, `⏎` apply), `i` inspector, `u` consumers,
-`D` decisions (`E` export), `L` label, `←→` fold/unfold, `[ ]` hop branches, `f` filter,
-`/` search, `g/G`, and how to read the screen.
+Keys inside `/tree` (vim-aligned): `j k` `ctrl+d ctrl+u` `gg G` move · `[ ]` hop between
+branches · `h l` `Tab` fold/unfold · `⏎` go (the footer says what it will do for the selected row)
+· `b` branch · `m` merge · `c` crop mode (`space` mark, `a` auto, `t` result⇄turn, `⏎` apply) ·
+`u` undo (`x` too) · `/` live search, `n N` next/prev · `f` filter picker · `i` inspector ·
+`1 2 3` lanes, `0` off · `s` what's filling the context · `D` decisions · `L` label · `y` copy ·
+`?` help · `q`.
 
 ## Commands
 

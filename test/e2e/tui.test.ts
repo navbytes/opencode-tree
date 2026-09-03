@@ -43,7 +43,7 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
           ["mock reply", 8, "/tree"],
           ["Context tree", 0.5, "\\r"],
           ["Context tree ·", 2, "c"],
-          ["crop mode", 1, "g"],
+          ["crop mode", 1, "gg"],
           ["crop mode", 2, "j"],
           ["crop mode", 3, " "],
           ["crop mode", 4.5, " "],

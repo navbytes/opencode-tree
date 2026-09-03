@@ -32,6 +32,7 @@ export type JumpPlan =
  * - the **last message of the current session** → noop, "already here".
  */
 export function planJump(row: Row, ctx: { transcripts: Record<string, Transcript>; currentSessionID: string }): JumpPlan {
+  if (row.kind === "separator") return { kind: "noop", reason: "nothing to go to" }
   if (row.kind === "branch") return row.sessionID === ctx.currentSessionID ? { kind: "noop", reason: "you are here" } : { kind: "switch", sessionID: row.sessionID }
   const tr = ctx.transcripts[row.sessionID]
   if (!tr) return { kind: "noop", reason: "that session is not loaded" }

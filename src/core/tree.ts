@@ -40,6 +40,9 @@ export type TurnRow = {
   isTip: boolean
   isDecision: boolean
   isSummary: boolean
+  /** false for rows the current session never sends: an ancestor's rows past the point where
+   *  this path forked away, and every other branch's rows (DESIGN.md §7.1). */
+  inContext: boolean
 }
 
 export type StepRow = {
@@ -55,11 +58,16 @@ export type StepRow = {
   tokens: number
   estimated: boolean
   durationMs?: number
+  /** Time the model spent reasoning for the owning message, folded onto its first real step:
+   *  outside the `all` filter thinking parts get no row of their own. */
+  thinkingMs?: number
   isError: boolean
   isCropped: boolean
   warn: boolean
   /** Label of the owning message, shown on its first step row only. */
   label?: string
+  /** See TurnRow.inContext. */
+  inContext: boolean
 }
 
 export type BranchRow = {
@@ -82,7 +90,19 @@ export type BranchRow = {
   last: boolean
 }
 
-export type Row = TurnRow | StepRow | BranchRow
+/** Decoration drawn in an ancestor right after the point where the current path forked away:
+ *  everything below it in that session is history the model is not shown. Never selectable. */
+export type SeparatorRow = {
+  kind: "separator"
+  id: string
+  depth: number
+  gutter: string
+  text: string
+}
+
+export type Row = TurnRow | StepRow | BranchRow | SeparatorRow
+
+const OFF_PATH_TEXT = "── not in this branch's context ──"
 
 export type TreeView = {
   rows: Row[]
@@ -293,7 +313,7 @@ function isCropped(ctx: Ctx, messageID: string, partID: string): boolean {
   return ctx.crops.some((c) => c.messageID === messageID && (c.partID === undefined || c.partID === partID))
 }
 
-function emitAssistantRows(ctx: Ctx, sessionID: string, message: TranscriptMessage, depth: number, gutter: string, out: Row[]): void {
+function emitAssistantRows(ctx: Ctx, sessionID: string, message: TranscriptMessage, depth: number, gutter: string, inContext: boolean, out: Row[]): void {
   if (message.summary) {
     // OpenCode-native compaction summary: one row for the whole message (DESIGN.md §7).
     if (!stepAllowed(ctx.filter, "text")) return
@@ -319,18 +339,29 @@ function emitAssistantRows(ctx: Ctx, sessionID: string, message: TranscriptMessa
       isError: false,
       isCropped: false,
       warn: tokens >= WARN_TOKENS,
+      inContext,
     })
     return
   }
 
+  // Reasoning parts were 40–50% of the outline and say nothing: outside `all` they get no row
+  // and their duration rides the message's first real step instead (`· 9.8s thought`).
+  const collapseThinking = ctx.filter !== "all"
+  const rows: StepRow[] = []
+  let thinkingMs: number | undefined
   let first = true
   for (const part of message.parts) {
     const kind = stepKind(part)
+    if (collapseThinking && kind === "reasoning") {
+      const ms = durationOfPart(part)
+      if (ms !== undefined) thinkingMs = (thinkingMs ?? 0) + ms
+      continue
+    }
     const label = first ? ctx.labels[message.id] : undefined
     if (!stepAllowed(ctx.filter, kind, Boolean(label))) continue
     const { tokens, estimated } = stepTokensFor(part, message)
     first = false
-    out.push({
+    rows.push({
       kind: "step",
       id: `${sessionID}:${message.id}:${part.id}`,
       sessionID,
@@ -347,8 +378,40 @@ function emitAssistantRows(ctx: Ctx, sessionID: string, message: TranscriptMessa
       isCropped: isCropped(ctx, message.id, part.id),
       warn: tokens >= WARN_TOKENS,
       label,
+      inContext,
     })
   }
+
+  if (rows.length > 0) {
+    if (thinkingMs !== undefined) rows[0]!.thinkingMs = thinkingMs
+  } else if (collapseThinking) {
+    // nothing but thinking: keep one row, standing for the whole message, or it goes invisible
+    const thinking = message.parts.filter((p) => stepKind(p) === "reasoning")
+    const label = ctx.labels[message.id]
+    if (thinking.length > 0 && stepAllowed(ctx.filter, "reasoning", Boolean(label))) {
+      const tokens = thinking.reduce((sum, p) => sum + stepTokensFor(p, message).tokens, 0)
+      rows.push({
+        kind: "step",
+        id: `${sessionID}:${message.id}:${thinking[0]!.id}`,
+        sessionID,
+        messageID: message.id,
+        partID: thinking[0]!.id,
+        depth,
+        gutter,
+        glyph: "○",
+        preview: partPreview(thinking[0]!),
+        tokens,
+        estimated: thinking.some((p) => stepTokensFor(p, message).estimated),
+        durationMs: thinkingMs,
+        isError: false,
+        isCropped: isCropped(ctx, message.id, thinking[0]!.id),
+        warn: tokens >= WARN_TOKENS,
+        label,
+        inContext,
+      })
+    }
+  }
+  out.push(...rows)
 }
 
 /** A branch is open in the outline when the user has toggled it: on-path branches start open
@@ -441,17 +504,34 @@ function emitChildBranches(ctx: Ctx, sessionID: string, anchorMessageID: string,
   })
 }
 
+/** The message after which the current path leaves `sessionID` — its on-path child's anchor.
+ *  undefined for the current session and for branches off the path (nothing forks away). */
+function forkAnchorOf(ctx: Ctx, sessionID: string): string | undefined {
+  const childID = ctx.onPathChild.get(sessionID)
+  return childID ? ctx.state.sessions[childID]?.anchorMessageID : undefined
+}
+
 /**
  * Depth-first over one session: emit its own `messages` (the tail after any copied prefix)
  * as rows at `depth`/`gutter`, and after each message recurse into the branches anchored on
  * it. `turnStart` seeds the turn counter (a branch continues its parent's numbering).
+ *
+ * Rows are marked `inContext` while they are part of what the current session sends: an
+ * ancestor's rows up to and including its fork point, and the current session's own rows.
+ * Where that stops, one separator row is drawn before the next row this session contributes.
  */
 function walkSession(ctx: Ctx, sessionID: string, messages: TranscriptMessage[], depth: number, gutter: string, turnStart: number, out: Row[]): void {
   const lastUserIndex = findLastUserIndex(messages, ctx.filter)
   const counter = { turn: turnStart }
   // set by a hidden plugin command turn, so the acknowledgement that follows it goes too
   let inPluginCommand = false
+  const forkAnchor = forkAnchorOf(ctx, sessionID)
+  let inContext = ctx.onPath.has(sessionID)
+  // anchor "" — the path forked before this session's first message, so none of it is sent
+  let separatorDue = inContext && forkAnchor === ""
+  if (separatorDue) inContext = false
   messages.forEach((message, i) => {
+    const before = out.length
     if (message.role === "user") {
       inPluginCommand = hiddenPluginTurn(ctx.filter, message)
       if (!inPluginCommand) {
@@ -478,15 +558,26 @@ function walkSession(ctx: Ctx, sessionID: string, messages: TranscriptMessage[],
             isTip: i === lastUserIndex,
             isDecision,
             isSummary,
+            inContext,
           })
         }
       }
     } else if (!inPluginCommand) {
-      emitAssistantRows(ctx, sessionID, message, depth, gutter, out)
+      emitAssistantRows(ctx, sessionID, message, depth, gutter, inContext, out)
     }
     // Branches attach right after their anchor — the last message they share with
     // this session — whichever role that message has.
     emitChildBranches(ctx, sessionID, message.id, depth, gutter, out)
+
+    // drawn lazily, so a fork point with nothing after it never leaves a dangling separator
+    if (separatorDue && out.length > before) {
+      out.splice(before, 0, { kind: "separator", id: `separator:${sessionID}`, depth, gutter, text: OFF_PATH_TEXT })
+      separatorDue = false
+    }
+    if (inContext && message.id === forkAnchor) {
+      inContext = false
+      separatorDue = true
+    }
   })
 }
 
@@ -502,6 +593,8 @@ function rowSearchFields(row: Row): string[] {
       return row.label ? [row.preview, row.label] : [row.preview]
     case "branch":
       return row.model ? [row.name, row.model, row.status] : [row.name, row.status]
+    case "separator":
+      return [] // decoration: a flat search hit list has no fork point to divide
   }
 }
 
@@ -644,7 +737,7 @@ export function buildTreeView(o: BuildOptions): TreeView {
   let currentRowId: string | undefined
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i]!
-    if (r.kind !== "branch" && r.sessionID === o.currentSessionID) {
+    if ((r.kind === "turn" || r.kind === "step") && r.sessionID === o.currentSessionID) {
       currentRowId = r.id
       break
     }

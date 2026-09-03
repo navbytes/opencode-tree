@@ -21,7 +21,7 @@ describe("planJump", () => {
   })
   test("tip of the current session → noop; tip of another session → switch", () => {
     expect(planJump(view.rows[view.indexById[view.currentRowId!]!]!, { transcripts: f.transcripts, currentSessionID: TRUNK }).kind).toBe("noop")
-    const openTip = [...view.rows].reverse().find((r) => r.kind !== "branch" && r.sessionID === OPEN)!
+    const openTip = [...view.rows].reverse().find((r) => (r.kind === "turn" || r.kind === "step") && r.sessionID === OPEN)!
     expect(planJump(openTip, { transcripts: f.transcripts, currentSessionID: TRUNK })).toEqual({ kind: "switch", sessionID: OPEN })
   })
   test("from inside a branch, a prefix row forks the trunk, not the copy", () => {
