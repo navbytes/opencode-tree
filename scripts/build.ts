@@ -7,6 +7,7 @@
  * provide those at runtime (see DESIGN.md §3.2 and the verified build recipe).
  */
 import solidPlugin from "@opentui/solid/bun-plugin"
+import pkg from "../package.json"
 
 const EXTERNAL = ["@opencode-ai/*", "@opentui/*", "solid-js", "solid-js/*"]
 
@@ -19,6 +20,7 @@ async function build(entrypoint: string, outdir: string, outFile: string, withSo
     naming: outFile,
     plugins: withSolid ? [solidPlugin] : [],
     external: EXTERNAL,
+    define: { __CTREE_VERSION__: JSON.stringify(pkg.version) },
   })
   if (!result.success) {
     console.error(`build failed: ${entrypoint}`)

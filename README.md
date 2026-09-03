@@ -38,6 +38,16 @@ To register by hand instead, the package name must be listed in **both** files:
 { "plugin": ["opencode-context-tree"] }
 ```
 
+**Upgrading.** OpenCode keeps the version it installed and does not re-check `@latest` on restart.
+To move to a new release, pin it (this also rewrites both config entries):
+
+```sh
+opencode plugin opencode-context-tree@0.2.0 -g --force     # or without -g for the project
+```
+
+or delete `~/.cache/opencode/packages/opencode-context-tree@latest` and restart. `?` in `/tree`
+and `/ctree status` show the version you are running.
+
 Options go in either file: `[["opencode-context-tree", { "storage": "global", "jumpSummary": "never" }]]`
 (see [docs/USAGE.md](docs/USAGE.md)). To hack on it from a checkout, see "Try it from source" below.
 

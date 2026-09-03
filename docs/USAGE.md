@@ -39,6 +39,18 @@ unfold toggle go branch label filter_pick filter_prev search search_next search_
 crop crop_toggle_mode mark auto undo merge inspector consumers copy mode_duration mode_turns
 mode_calls lanes_off decisions export help`.
 
+## Upgrading
+
+OpenCode caches the version it installed and does not re-resolve `@latest` on restart. Pin the new
+release, which also rewrites both config entries:
+
+```sh
+opencode plugin opencode-context-tree@0.2.0 -g --force     # drop -g for the current project
+```
+
+or delete `~/.cache/opencode/packages/opencode-context-tree@latest` and restart. `?` in `/tree` and
+`/ctree status` print the running version.
+
 ## The loop
 
 ```

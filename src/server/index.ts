@@ -16,6 +16,7 @@ import { CTREE_HELP, parseCtreeArgs } from "../core/ctree-args.js"
 import { autoMark, planResultCrop, resultCandidates, topCandidate, type CropRules, DEFAULT_RULES } from "../core/cropplan.js"
 import { planUndo } from "../core/undo.js"
 import { exportDecisions } from "../core/decision.js"
+import { PLUGIN_VERSION } from "../shared/version.js"
 import type { Transcript, TranscriptMessage } from "../core/transcript.js"
 import { parseForkTitle } from "../core/adopt.js"
 import { adoptNativeForks } from "../shared/adopt.js"
@@ -97,7 +98,7 @@ export const server: Plugin = async ({ worktree, client, directory }, options) =
         const cmd = parseCtreeArgs(input.arguments)
         switch (cmd.kind) {
           case "help":
-            return say(output, `${cmd.error ? `error: ${cmd.error}\n\n` : ""}${CTREE_HELP}`)
+            return say(output, `${cmd.error ? `error: ${cmd.error}\n\n` : ""}${CTREE_HELP}\n(opencode-context-tree ${PLUGIN_VERSION})`)
           case "status": {
             await adopt() // headless clients have no TUI half to do it for them
             const state = store.stateForSession(sessionID)
@@ -108,7 +109,7 @@ export const server: Plugin = async ({ worktree, client, directory }, options) =
             const branches = Object.values(state.sessions).filter((b) => b.parentSessionID === sessionID)
             // an adopted native fork carries no journal name: fall back to the session's own title
             const title = me && !me.name ? ((await client.session.get({ path: { id: sessionID }, query: { directory } }).catch(() => undefined))?.data as { title?: string } | undefined)?.title : undefined
-            return say(output, [`tree ${state.treeId}`, me ? `this session is ⎇ ${me.name ?? title ?? "branch"} (${me.status}) of ${me.parentSessionID}${me.note ? ` — ${me.note}` : ""}` : "this session is the trunk", `${branches.length} branch(es) from here: ${branches.map((b) => `${b.name ?? b.sessionID} [${b.status}]`).join(", ") || "none"}`, `${crops.length} active crop(s), ~${hidden} tokens hidden`, `${Object.values(state.decisions).filter((d) => d.sessionID === sessionID && !d.hidden).length} decision record(s) here`].join("\n"))
+            return say(output, [`opencode-context-tree ${PLUGIN_VERSION} · tree ${state.treeId}`, me ? `this session is ⎇ ${me.name ?? title ?? "branch"} (${me.status}) of ${me.parentSessionID}${me.note ? ` — ${me.note}` : ""}` : "this session is the trunk", `${branches.length} branch(es) from here: ${branches.map((b) => `${b.name ?? b.sessionID} [${b.status}]`).join(", ") || "none"}`, `${crops.length} active crop(s), ~${hidden} tokens hidden`, `${Object.values(state.decisions).filter((d) => d.sessionID === sessionID && !d.hidden).length} decision record(s) here`].join("\n"))
           }
           case "branch": {
             const tr = await transcriptOf(sessionID)

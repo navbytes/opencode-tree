@@ -4,6 +4,7 @@
  * OpenCode data through the adapters, actions through ./actions.
  */
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
+import { PLUGIN_VERSION } from "../shared/version.js"
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import { planJump } from "../core/actions.js"
 import { foldJournal, type TreeState } from "../core/journal.js"
@@ -195,7 +196,7 @@ const NO_BRANCHES = "No branches yet · b forks here into a real OpenCode sessio
 /** The `?` pane: unindented lines are headings, indented ones body (see the render).
  *  It sits under the rows, so the tree stays on screen while you read it. */
 const HELP = [
-  "? help · ? or esc closes",
+  `? help · ? or esc closes · opencode-context-tree ${PLUGIN_VERSION}`,
   "Move",
   "  ↑↓ j k · J K by 20 · ctrl+d ctrl+u half page · gg top · G bottom · [ ] branch rows",
   "  h l ← → fold/unfold a branch · Tab (or e) toggle · / live search · n N next/prev match",
