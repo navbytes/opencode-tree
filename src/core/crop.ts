@@ -8,6 +8,8 @@
  * test/core-purity.test.ts.
  */
 
+import { formatK } from "./tokens.js"
+
 export type MinimalToolState = {
   status?: string
   input?: unknown
@@ -55,12 +57,6 @@ export type CropSpec = {
 
 const CROPPED_PREFIX = "[cropped:"
 const DROPPED_PREFIX = "[dropped turn"
-
-function formatK(tokens: number): string {
-  if (tokens < 1000) return String(tokens)
-  const k = (tokens / 1000).toFixed(1)
-  return `${k.endsWith(".0") ? k.slice(0, -2) : k}k`
-}
 
 function isDecisionMessage(message: MinimalMessage): boolean {
   return message.parts.some((p) => {

@@ -68,6 +68,9 @@ export type StepRow = {
   label?: string
   /** See TurnRow.inContext. */
   inContext: boolean
+  /** The owning assistant message's real token report (DESIGN.md §6.7's inspector Prompt/Reply
+   *  lines), carried on every one of its step rows; undefined until the provider costs it. */
+  tokenFields?: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number }
 }
 
 export type BranchRow = {
@@ -216,6 +219,14 @@ function stepTokensFor(part: StepPart, message: TranscriptMessage): { tokens: nu
   return { tokens: estimateTokens(text), estimated: true }
 }
 
+/** The message-level token breakdown for the inspector's Prompt/Reply lines; undefined until
+ *  the provider has actually costed this message (DESIGN.md §6.7), same test as `stepTokensFor`. */
+function tokenFieldsOf(message: TranscriptMessage): StepRow["tokenFields"] {
+  const tk = message.tokens
+  if (typeof tk?.output !== "number" || tk.output <= 0) return undefined
+  return { input: tk.input ?? 0, output: tk.output, reasoning: tk.reasoning ?? 0, cacheRead: tk.cache?.read ?? 0, cacheWrite: tk.cache?.write ?? 0 }
+}
+
 function aggregateTokens(messages: TranscriptMessage[]): number {
   let total = 0
   for (const m of messages) {
@@ -347,6 +358,7 @@ function emitAssistantRows(ctx: Ctx, sessionID: string, message: TranscriptMessa
   // Reasoning parts were 40–50% of the outline and say nothing: outside `all` they get no row
   // and their duration rides the message's first real step instead (`· 9.8s thought`).
   const collapseThinking = ctx.filter !== "all"
+  const tokenFields = tokenFieldsOf(message)
   const rows: StepRow[] = []
   let thinkingMs: number | undefined
   let first = true
@@ -379,6 +391,7 @@ function emitAssistantRows(ctx: Ctx, sessionID: string, message: TranscriptMessa
       warn: tokens >= WARN_TOKENS,
       label,
       inContext,
+      tokenFields,
     })
   }
 
@@ -408,6 +421,7 @@ function emitAssistantRows(ctx: Ctx, sessionID: string, message: TranscriptMessa
         warn: tokens >= WARN_TOKENS,
         label,
         inContext,
+        tokenFields,
       })
     }
   }

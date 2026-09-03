@@ -404,7 +404,10 @@ reverts it as described in 6.2–6.5, with a confirm naming what will happen
 band relative to the model limit (<25% · <60% · <85% · red; absolute <8k · 8–32k · 32–64k · ≥64k
 when the limit is unknown), from the last assistant reply with output tokens:
 `input + output + reasoning + cache.read + cache.write`, OpenCode's own sidebar rule
-(+ chars/4 for anything newer, shown as `~`), attribution = the biggest new part since
+(+ chars/4 for anything newer, shown as `~`), then `· 95% cached`: the share of that prompt
+served from the provider's cache, shown once the provider has reported cache tokens in the
+session (so `0% cached` after a crop, merge or fork means the cache was reset), with the bar's
+filled cells split dim-cached / bright-fresh; attribution = the biggest new part since
 the last turn. One-time toast when entering red; a separate warning when within the
 compaction reserve (`model.limit.context − compaction.reserved`), because OpenCode's
 auto-compaction is the *lossy* event the user wants to pre-empt with `/crop` or

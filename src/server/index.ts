@@ -19,6 +19,7 @@ import { exportDecisions } from "../core/decision.js"
 import { PLUGIN_VERSION } from "../shared/version.js"
 import { debug } from "../shared/debug.js"
 import type { Transcript, TranscriptMessage } from "../core/transcript.js"
+import { cacheShare, contextSizeOf, formatK, type MinimalMessage as MinimalTokenMessage } from "../core/tokens.js"
 import { parseForkTitle } from "../core/adopt.js"
 import { adoptNativeForks } from "../shared/adopt.js"
 
@@ -117,7 +118,11 @@ export const server: Plugin = async ({ worktree, client, directory }, options) =
             const hidden = crops.reduce((s, c) => s + c.targets.reduce((x, y) => x + y.estTokens, 0), 0)
             const branches = Object.values(state.sessions).filter((b) => b.parentSessionID === sessionID)
             const listed = await Promise.all(branches.map(async (b) => `${await branchLabel(b.sessionID, b.name)} [${b.status}]`))
-            return say(output, [`opencode-context-tree ${PLUGIN_VERSION} · tree ${state.treeId}`, me ? `this session is ⎇ ${await branchLabel(sessionID, me.name)} (${me.status}) of ${me.parentSessionID}${me.note ? ` — ${me.note}` : ""}` : "this session is the trunk", `${branches.length} branch(es) from here: ${listed.join(", ") || "none"}`, `${crops.length} active crop(s), ~${hidden} tokens hidden`, `${Object.values(state.decisions).filter((d) => d.sessionID === sessionID && !d.hidden).length} decision record(s) here`].join("\n"))
+            const tr = await transcriptOf(sessionID)
+            const size = contextSizeOf(tr.messages.map((m): MinimalTokenMessage => ({ info: m.role === "assistant" ? { role: "assistant", tokens: m.tokens } : { role: "user" }, parts: m.parts })))
+            const share = cacheShare(size)
+            const contextLine = `context ${size.estimated ? "~" : ""}${formatK(size.tokens)}${share !== undefined ? ` · ${formatK(size.cached!)} cached (${share}%)` : ""}`
+            return say(output, [`opencode-context-tree ${PLUGIN_VERSION} · tree ${state.treeId}`, me ? `this session is ⎇ ${await branchLabel(sessionID, me.name)} (${me.status}) of ${me.parentSessionID}${me.note ? ` — ${me.note}` : ""}` : "this session is the trunk", contextLine, `${branches.length} branch(es) from here: ${listed.join(", ") || "none"}`, `${crops.length} active crop(s), ~${hidden} tokens hidden`, `${Object.values(state.decisions).filter((d) => d.sessionID === sessionID && !d.hidden).length} decision record(s) here`].join("\n"))
           }
           case "branch": {
             const tr = await transcriptOf(sessionID)

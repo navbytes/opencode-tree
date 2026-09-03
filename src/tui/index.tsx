@@ -5,7 +5,7 @@
  */
 import type { TuiPluginApi, TuiPlugin } from "@opencode-ai/plugin/tui"
 import { Show, createEffect, createMemo, createSignal, on } from "solid-js"
-import { bandFor, contextSizeOf, formatContext, formatK, type MinimalMessage, type MinimalPart } from "../core/tokens.js"
+import { bandFor, cacheShare, contextSizeOf, formatK, type MinimalMessage, type MinimalPart } from "../core/tokens.js"
 import { JournalStore, type StorageMode } from "../shared/store.js"
 import { debug } from "../shared/debug.js"
 import { BRANCH_DIALOG, MERGE_TRUST, branchLabel, bumpJournal, clip, createNamedBranch, journalRevision, mergeBranch, mergeDialogOptions, mergeDialogTitle, mergePickerFigures, setLabel, type MergeMode } from "./actions.js"
@@ -15,6 +15,7 @@ import { TreeRoute } from "./route.js"
 import { parseForkTitle } from "../core/adopt.js"
 import { adoptNativeForks } from "../shared/adopt.js"
 import { fetchTranscript, modelContextLimit } from "./transcripts.js"
+import { ContextGauge } from "./gauge.js"
 
 const BAND_COLOR = { low: "success", healthy: "success", filling: "warning", red: "error" } as const
 
@@ -330,7 +331,10 @@ const tui: TuiPlugin = async (api, rawOptions) => {
               <text fg={t.success}>{`⎇ ${branchLabel(api, props.session_id, branch()!.name, CARD_COLUMNS - 2)}`}</text>
               <text fg={t.textMuted}>{status()}</text>
             </Show>
-            <text fg={t[BAND_COLOR[bandFor(size().tokens, limit())]]}>{formatContext(size(), limit())}</text>
+            <ContextGauge theme={t} size={size()} limit={limit()} showCachedSuffix={false} />
+            <Show when={cacheShare(size()) !== undefined}>
+              <text fg={t.textMuted}>{`${formatK(size().cached!)} cached of ${formatK(size().prompt!)} (${cacheShare(size())}%)`}</text>
+            </Show>
             <Show when={crops().length}>
               <text fg={t.warning}>{`✂ ${crops().length} crop${crops().length === 1 ? "" : "s"} · ~${formatK(hidden())} hidden`}</text>
             </Show>
@@ -407,8 +411,14 @@ const tui: TuiPlugin = async (api, rawOptions) => {
           } else if (lim && size().tokens < lim - reserve() * 2) guardNudged = false
         })
         return (
-          // the same string the tree header shows, so both surfaces read identically
-          <text fg={t[BAND_COLOR[band()]]}>{`${branch() ? `⎇ ${branchLabel(api, props.session_id, branch()!.name, 24)} · ` : ""}${formatContext(size(), limit())}${trend()}`}</text>
+          // the same gauge the tree header shows, so both surfaces read identically
+          <box flexDirection="row">
+            <Show when={branch()}>
+              <text fg={t[BAND_COLOR[band()]]}>{`⎇ ${branchLabel(api, props.session_id, branch()!.name, 24)} · `}</text>
+            </Show>
+            <ContextGauge theme={t} size={size()} limit={limit()} />
+            <text fg={t[BAND_COLOR[band()]]}>{trend()}</text>
+          </box>
         )
       },
     },
