@@ -3,7 +3,7 @@
  * through `api.client` (SDK v2) and writes journal lines through the shared store.
  * Pure planning lives in core; this file only executes plans.
  */
-import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
+import type { TuiPluginApi, TuiToast } from "@opencode-ai/plugin/tui"
 import { createSignal } from "solid-js"
 import fs from "node:fs"
 import path from "node:path"
@@ -26,6 +26,9 @@ export type ActionContext = {
   api: TuiPluginApi
   store: JournalStore
   directory: string
+  /** Route-level feedback (the tree route's status line, `notify` in route.tsx); a caller
+   *  without one — the palette, with no route open — falls back to `api.ui.toast` below. */
+  notify?: (message: string, ms?: number) => void
 }
 
 export type SummaryChoice = { kind: "none" } | { kind: "summarize"; customInstructions?: string }
@@ -44,6 +47,13 @@ function record<T extends JournalEntry["type"]>(ctx: ActionContext, treeId: stri
   const entry = ctx.store.record(treeId, type, data as never, "tui")
   bumpJournal()
   return entry
+}
+
+/** Every user-facing message from an action goes through here: the tree route's `ctx.notify`
+ *  when one is set, else `api.ui.toast` (the palette, with no route open, sees it fine). */
+function notify(ctx: ActionContext, input: TuiToast): void {
+  if (ctx.notify) ctx.notify(input.message, input.duration)
+  else ctx.api.ui.toast(input)
 }
 
 const SUMMARY_SYSTEM =
@@ -114,7 +124,7 @@ async function abortIfBusy(ctx: ActionContext, sessionID: string): Promise<boole
   const status = ctx.api.state.session.status(sessionID)
   if (!status || (status as any).type === "idle") return false
   await ctx.api.client.session.abort({ sessionID, directory: ctx.directory }).catch(() => undefined)
-  ctx.api.ui.toast({ variant: "warning", message: "Aborted the running response before switching" })
+  notify(ctx, { variant: "warning", message: "Aborted the running response before switching" })
   return true
 }
 
@@ -182,7 +192,7 @@ export async function executeJump(
 ): Promise<string | undefined> {
   debug("jump.plan", { plan, current: opts.currentSessionID, summary: opts.summary.kind })
   if (plan.kind === "noop") {
-    ctx.api.ui.toast({ message: plan.reason })
+    notify(ctx, { message: plan.reason })
     return undefined
   }
   await abortIfBusy(ctx, opts.currentSessionID)
@@ -193,14 +203,17 @@ export async function executeJump(
   } else {
     target = await forkBranch(ctx, { sessionID: plan.sessionID, messageID: plan.messageID, kind: plan.mode === "redo" ? "redo" : "jump" })
   }
+  let summaryNotice: TuiToast | undefined
   if (opts.summary.kind === "summarize" && leavingTip && target !== opts.currentSessionID) {
     // the fork already exists; a failed summary must not strand the user on the old session
-    await summarizeInto(ctx, { fromSessionID: opts.currentSessionID, fromMessageID: leavingTip, targetSessionID: target, customInstructions: opts.summary.customInstructions }).catch((e) =>
-      ctx.api.ui.toast({ variant: "error", message: `summary failed: ${e instanceof Error ? e.message : String(e)} — moved without it` }),
-    )
+    await summarizeInto(ctx, { fromSessionID: opts.currentSessionID, fromMessageID: leavingTip, targetSessionID: target, customInstructions: opts.summary.customInstructions })
+      .then(() => (summaryNotice = { variant: "success", message: "Branch summary added" }))
+      .catch((e) => (summaryNotice = { variant: "error", message: `summary failed: ${e instanceof Error ? e.message : String(e)} — moved without it` }))
   }
   debug("jump.navigate", { target })
   navigateToSession(ctx, target)
+  // the route has unmounted by now, so this always goes through the toast, not ctx.notify
+  if (summaryNotice) ctx.api.ui.toast(summaryNotice)
   if (plan.kind === "fork" && plan.prefill) {
     await new Promise((r) => setTimeout(r, 0))
     await ctx.api.client.tui.appendPrompt({ text: plan.prefill, directory: ctx.directory }).catch(() => undefined)
@@ -254,7 +267,6 @@ export async function summarizeInto(
     const messageID = (injected.data as any)?.info?.id ?? (injected.data as any)?.id
     const treeId = ctx.store.ensureTree(input.targetSessionID, "tui")
     record(ctx, treeId, "summary.recorded", { sessionID: input.targetSessionID, messageID: String(messageID ?? ""), fromSessionID: input.fromSessionID, fromMessageID: input.fromMessageID })
-    ctx.api.ui.toast({ variant: "success", message: "Branch summary added" })
     return summary
   } finally {
     await ctx.api.client.session.delete({ sessionID: helperID, directory: ctx.directory }).catch(() => undefined)
@@ -264,6 +276,7 @@ export async function summarizeInto(
 export function setLabel(ctx: ActionContext, input: { sessionID: string; messageID: string; label: string | null }): void {
   const treeId = ctx.store.ensureTree(input.sessionID, "tui")
   record(ctx, treeId, "label.set", { sessionID: input.sessionID, messageID: input.messageID, label: input.label })
+  notify(ctx, { variant: "success", message: input.label ? `labelled: ${input.label}` : "label removed" })
 }
 
 /** Record a crop (the server half applies it on the next turn). With `hard`, result crops
@@ -293,13 +306,13 @@ export async function executeUndo(ctx: ActionContext, sessionID: string, plan: U
   debug("undo.plan", { plan })
   switch (plan.kind) {
     case "nothing":
-      ctx.api.ui.toast({ message: "nothing to undo on this path" })
+      notify(ctx, { message: "nothing to undo on this path" })
       return undefined
     case "restore-crop": {
       record(ctx, treeId, "crop.restored", { cropID: plan.cropID })
       const crop = ctx.store.stateFor(treeId).crops[plan.cropID]
       if (crop && crop.mode === "result") await setCompacted(ctx, sessionID, crop.targets.map((t) => ({ messageID: t.messageID, partID: t.partID })), undefined)
-      ctx.api.ui.toast({ variant: "success", message: `↶ restored ${plan.mode === "turn" ? "dropped turn" : "cropped result"} (~${Math.round(plan.estTokens / 100) / 10}k tokens back in context)` })
+      notify(ctx, { variant: "success", message: `↶ restored ${plan.mode === "turn" ? "dropped turn" : "cropped result"} (~${Math.round(plan.estTokens / 100) / 10}k tokens back in context)` })
       return undefined
     }
     case "abandon-branch": {
@@ -376,9 +389,18 @@ export function mergeTargetOf(label: string, messages: readonly TranscriptMessag
 export async function mergePickerFigures(ctx: ActionContext, state: TreeState, sessionID: string): Promise<{ turns: number; target?: MergeTarget }> {
   const branch = state.sessions[sessionID]
   if (!branch) return { turns: 0 }
-  // the parent is usually not the loaded session, so its figures come over the SDK
-  const parent = await fetchTranscript(ctx.api, branch.parentSessionID, ctx.directory).catch(() => undefined)
-  const turns = ownTurnCount(ctx.api.state.session.messages(sessionID), { messageID: branch.anchorMessageID, parentMessageIDs: parent?.messages.map((m) => m.id) ?? [] })
+  // api.state.session.messages caps at OpenCode's last page (~100): a long branch needs the
+  // unpaged SDK copy for its own turns, fetched alongside the parent below (one round trip,
+  // not two in sequence) so opening the picker never gets a visible delay
+  const [own, parent] = await Promise.all([fetchOwnTranscript(ctx, sessionID).catch(() => undefined), fetchTranscript(ctx.api, branch.parentSessionID, ctx.directory).catch(() => undefined)])
+  const ownMessages = own?.messages?.length ? own.messages : ctx.api.state.session.messages(sessionID)
+  const parentMessageIDs = (parent?.messages?.length ? parent.messages : ctx.api.state.session.messages(branch.parentSessionID)).map((m) => m.id)
+  const anchorIndex = branch.anchorMessageID ? parentMessageIDs.indexOf(branch.anchorMessageID) : -1
+  // anchor still missing after both fetches: the unpaged own list would count the inherited prefix too
+  const turns =
+    branch.anchorMessageID && anchorIndex < 0
+      ? ownTurnCount(ctx.api.state.session.messages(sessionID), { messageID: branch.anchorMessageID, parentMessageIDs })
+      : ownTurnCount(ownMessages, { messageID: branch.anchorMessageID, parentMessageIDs })
   if (!parent) return { turns }
   const up = state.sessions[branch.parentSessionID]
   const grand = up ? await fetchTranscript(ctx.api, up.parentSessionID, ctx.directory).catch(() => undefined) : undefined
@@ -494,14 +516,14 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
     // note prompt has to abort too, not fall through as "no note"
     const ok = await confirmDialog(ctx, `Discard ⎇ ${name} (${plural(turns, "turn")})?`, DISCARD_NOTICE)
     if (!ok) {
-      ctx.api.ui.toast({ variant: "warning", message: `⎇ ${name} kept — nothing discarded` })
+      notify(ctx, { variant: "warning", message: `⎇ ${name} kept — nothing discarded` })
       return undefined
     }
     let note = input.note
     if (note === undefined) {
       const answer = await promptDialog(ctx, "Why? (optional note on the close marker)", "dead end")
       if (answer === undefined) {
-        ctx.api.ui.toast({ variant: "warning", message: `⎇ ${name} kept — nothing discarded` })
+        notify(ctx, { variant: "warning", message: `⎇ ${name} kept — nothing discarded` })
         return undefined
       }
       note = answer.trim() || undefined
@@ -535,14 +557,14 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
     else {
       const written = await promptDecisionRecord(ctx, name, model)
       if (!written) {
-        ctx.api.ui.toast({ variant: "warning", message: "merge aborted — nothing written" })
+        notify(ctx, { variant: "warning", message: "merge aborted — nothing written" })
         return undefined
       }
       draft = written
       typed = true
     }
   } else {
-    ctx.api.ui.toast({ message: `drafting the decision record for ⎇ ${name}…` })
+    notify(ctx, { message: `drafting the decision record for ⎇ ${name}…`, duration: 60000 })
     draft = await draftWithHelper(ctx, { title: `Context tree: draft for ${name}`, system: DECISION_SYSTEM, prompt: buildDecisionDraftPrompt({ branchName: name, model, transcript, siblings }), model: modelRef })
   }
   debug("merge.drafted", { chars: draft.length })
@@ -552,13 +574,13 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
   if (!input.confirm && !typed && !hasEditor()) throw new Error("no $EDITOR configured — set VISUAL/EDITOR, or use the in-app confirm")
   const confirmed = await confirm(draft)
   if (!confirmed) {
-    ctx.api.ui.toast({ variant: "warning", message: "merge aborted — nothing written" })
+    notify(ctx, { variant: "warning", message: "merge aborted — nothing written" })
     return undefined
   }
   // an unfilled template is not a record: landing it would cost the trunk ~130 tokens of
   // "<1–3 sentences: …>" and nothing else, so the branch stays open instead
   if (templatePlaceholders(confirmed).length > 0) {
-    ctx.api.ui.toast({ variant: "warning", message: "record not written: fill in the template" })
+    notify(ctx, { variant: "warning", message: "record not written: fill in the template" })
     return undefined
   }
 

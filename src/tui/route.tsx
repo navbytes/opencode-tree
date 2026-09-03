@@ -235,7 +235,6 @@ function bindingsFor(overrides: Record<string, string[]> | undefined) {
 export function TreeRoute(props: TreeRouteProps) {
   const { api, store, directory } = props
   const sessionID = props.sessionID
-  const ctx: ActionContext = { api, store, directory }
   const t = api.theme.current
 
   const [tick, setTick] = createSignal(0)
@@ -264,15 +263,17 @@ export function TreeRoute(props: TreeRouteProps) {
   const [marked, setMarked] = createSignal<Set<string>>(new Set())
 
   // `api.ui.toast` draws in the session chrome this route replaces, so a toast raised from here
-  // is never seen: route-level feedback goes to the status line instead.
+  // is never seen: route-level feedback goes to the status line instead. Actions shared with the
+  // palette (actions.ts) take this as `ctx.notify`, falling back to `api.ui.toast` without one.
   const [notice, setNotice] = createSignal<string | undefined>()
   let noticeTimer: ReturnType<typeof setTimeout> | undefined
-  const notify = (message: string) => {
+  const notify = (message: string, ms = 4000) => {
     setNotice(message)
     clearTimeout(noticeTimer)
-    noticeTimer = setTimeout(() => setNotice(undefined), 4000)
+    noticeTimer = setTimeout(() => setNotice(undefined), ms)
   }
   onCleanup(() => clearTimeout(noticeTimer))
+  const ctx: ActionContext = { api, store, directory, notify }
 
   const state = createMemo<TreeState>(() => {
     tick()
@@ -474,7 +475,7 @@ export function TreeRoute(props: TreeRouteProps) {
     if (!cropMode()) {
       const mode = modeForRow(row)
       if (!mode) {
-        api.ui.toast({ message: "nothing croppable on this row — c opens crop mode" })
+        notify("nothing croppable on this row — c opens crop mode")
         return
       }
       setCropMode(mode)
@@ -482,7 +483,7 @@ export function TreeRoute(props: TreeRouteProps) {
     const c = candidateOf(row)
     debug("crop.mark", { row: row.id, candidate: c ? { kind: c.kind, protections: c.protections } : undefined, marked: [...marked()] })
     if (!c) {
-      api.ui.toast({ message: cropMode() === "result" ? "select a tool result row" : "select a turn row" })
+      notify(cropMode() === "result" ? "select a tool result row" : "select a turn row")
       return
     }
     const hard = c.protections.filter((p) => p !== "too-small")
@@ -493,7 +494,7 @@ export function TreeRoute(props: TreeRouteProps) {
       next.delete(`${key}:warned`) // unmarking forgets the warning, so re-marking asks again
     } else if (hard.length && !(next.has(`${key}:warned`))) {
       next.add(`${key}:warned`)
-      api.ui.toast({ variant: "warning", message: `protected (${hard.join(", ")}) — press space again to mark anyway` })
+      notify(`protected (${hard.join(", ")}) — press space again to mark anyway`)
     } else next.add(key)
     setMarked(next)
   }
@@ -510,7 +511,7 @@ export function TreeRoute(props: TreeRouteProps) {
     if (cropMode() !== "result") return
     const picks = autoMark(resultCands())
     setMarked(new Set(picks.map((c) => c.partID)))
-    api.ui.toast({ message: picks.length ? `auto-marked ${picks.length} result${picks.length === 1 ? "" : "s"} (≥10k tokens, older than 2 turns)` : "nothing matches the auto rules" })
+    notify(picks.length ? `auto-marked ${picks.length} result${picks.length === 1 ? "" : "s"} (≥10k tokens, older than 2 turns)` : "nothing matches the auto rules")
   }
 
   async function applyMarked() {
@@ -518,7 +519,7 @@ export function TreeRoute(props: TreeRouteProps) {
     const picks = selectedCandidates()
     debug("crop.apply", { picks: picks.length, marked: [...marked()] })
     if (picks.length === 0) {
-      api.ui.toast({ message: "nothing marked — space marks a row, a auto-marks" })
+      notify("nothing marked — space marks a row, a auto-marks")
       return
     }
     // count the plans, not the marks: planTurnCrops refuses the current turn (cropplan.ts)
@@ -526,7 +527,7 @@ export function TreeRoute(props: TreeRouteProps) {
     const plans = result ? [planResultCrop(sessionID, picks as ResultCandidate[])].filter((p) => p !== undefined) : planTurnCrops(sessionID, picks as TurnCandidate[])
     const n = result ? (plans[0]?.targets.length ?? 0) : plans.length
     if (n === 0) {
-      api.ui.toast({ message: "nothing to crop — the current turn always stays in context" })
+      notify("nothing to crop — the current turn always stays in context")
       return
     }
     const total = plans.reduce((s, p) => s + p.targets.reduce((x, t) => x + t.estTokens, 0), 0)
@@ -534,7 +535,7 @@ export function TreeRoute(props: TreeRouteProps) {
     if (!ok) return
     await guarded("crop", async () => {
       for (const plan of plans) await applyCrop(ctx, plan, { hard: result && Boolean(props.options.hardCrop) })
-      api.ui.toast({ variant: "success", message: `✂ cropped ${n} · ~${formatK(total)} reclaimed` })
+      notify(`✂ cropped ${n} · ~${formatK(total)} reclaimed`)
       setMarked(new Set<string>())
       setCropMode(undefined)
     })
@@ -545,7 +546,7 @@ export function TreeRoute(props: TreeRouteProps) {
     const st = state()
     const plan = planUndo(store.entriesFor(st.treeId), st, sessionID)
     if (plan.kind === "nothing") {
-      api.ui.toast({ message: "nothing to undo on this path" })
+      notify("nothing to undo on this path")
       return
     }
     const what =
@@ -782,13 +783,13 @@ export function TreeRoute(props: TreeRouteProps) {
     setPanel("tree")
     if (!c || c.kind !== "tool") {
       setCropMode("result")
-      api.ui.toast({ message: c ? (c.note ?? `${c.source} is not a tool result; mark rows by hand`) : "nothing to crop" })
+      notify(c ? (c.note ?? `${c.source} is not a tool result; mark rows by hand`) : "nothing to crop")
       return
     }
     setCropMode("result")
     const picks = resultCands().filter((r) => r.tool === c.source && r.protections.length === 0)
     setMarked(new Set<string>(picks.map((r) => r.partID)))
-    api.ui.toast({ message: picks.length ? `marked ${picks.length} unprotected ${c.source} result${picks.length === 1 ? "" : "s"} — ⏎ to apply` : `every ${c.source} result is protected; mark with space (twice) to override` })
+    notify(picks.length ? `marked ${picks.length} unprotected ${c.source} result${picks.length === 1 ? "" : "s"} — ⏎ to apply` : `every ${c.source} result is protected; mark with space (twice) to override`)
   }
 
   function copySelected() {
@@ -799,9 +800,9 @@ export function TreeRoute(props: TreeRouteProps) {
     const text = row.kind === "step" ? String(msg?.parts.find((p) => p.id === row.partID)?.state?.output ?? msg?.parts.find((p) => p.id === row.partID)?.text ?? "") : (msg?.parts.map((p) => p.text ?? "").join("\n") ?? "")
     try {
       const { hint } = copyText(api, text, directory)
-      api.ui.toast({ message: `copied ${text.length} chars → ${hint}` })
+      notify(`copied ${text.length} chars → ${hint}`)
     } catch (e) {
-      api.ui.toast({ variant: "error", message: String(e) })
+      notify(`copy failed: ${e instanceof Error ? e.message : String(e)}`)
     }
   }
 
@@ -903,7 +904,7 @@ export function TreeRoute(props: TreeRouteProps) {
     try {
       await fn()
     } catch (e) {
-      api.ui.toast({ variant: "error", message: `${label}: ${e instanceof Error ? e.message : String(e)}` })
+      notify(`⚠ ${label} failed: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setBusy(undefined)
       bump()
@@ -923,7 +924,7 @@ export function TreeRoute(props: TreeRouteProps) {
     debug("route.jump", { row: { kind: row.kind, id: row.id }, plan })
     await guarded("jump", async () => {
       if (plan.kind === "noop") {
-        api.ui.toast({ message: plan.reason })
+        notify(plan.reason)
         return
       }
       const from = sessionLabel(plan.sessionID)
@@ -1059,9 +1060,9 @@ export function TreeRoute(props: TreeRouteProps) {
     const file = path.join(directory, "ctree-decisions.md")
     try {
       fs.writeFileSync(file, exportDecisions(records))
-      api.ui.toast({ variant: "success", message: `wrote ${records.length} record${records.length === 1 ? "" : "s"} → ${file}` })
+      notify(`wrote ${records.length} record${records.length === 1 ? "" : "s"} → ${file}`)
     } catch (e) {
-      api.ui.toast({ variant: "error", message: `export failed: ${e instanceof Error ? e.message : String(e)}` })
+      notify(`export failed: ${e instanceof Error ? e.message : String(e)}`)
     }
   }
 
@@ -1071,7 +1072,7 @@ export function TreeRoute(props: TreeRouteProps) {
     const idx = view().rows.findIndex((r) => (r.kind === "turn" || r.kind === "step") && r.messageID === d.messageID)
     setPanel("tree")
     if (idx >= 0) setSelected(idx)
-    else api.ui.toast({ message: "that record lives in another session" })
+    else notify("that record lives in another session")
   }
 
   // ---- keys ------------------------------------------------------------------
@@ -1147,7 +1148,7 @@ export function TreeRoute(props: TreeRouteProps) {
         return
       }
     }
-    api.ui.toast({ message: `no other row matches "${q}"` })
+    notify(`no other row matches "${q}"`)
   }
 
   function enterSearch() {
@@ -1306,7 +1307,7 @@ export function TreeRoute(props: TreeRouteProps) {
     }
     if (searchMode()) return `search: ${search()}▏ · ${pos} rows · ⏎ keeps it · esc clears`
     const said = notice()
-    if (said) return `${said}   ${pos} rows`
+    if (said) return `${clipTo(said, cols())}   ${pos} rows`
     return `filter: ${filter()}${search() ? `   search: "${search()}"` : ""}${busy() ? `   … ${busy()}` : ""}   ${pos} rows`
   }
 

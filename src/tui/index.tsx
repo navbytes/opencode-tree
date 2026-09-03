@@ -194,7 +194,6 @@ const tui: TuiPlugin = async (api, rawOptions) => {
           const value = await promptDialog("Label (empty to remove)", "checkpoint")
           if (value === undefined) return
           setLabel({ api, store, directory }, { sessionID, messageID: last.id, label: value.trim() || null })
-          api.ui.toast({ variant: "success", message: value.trim() ? `labelled: ${value.trim()}` : "label removed" })
         }),
       },
     ],

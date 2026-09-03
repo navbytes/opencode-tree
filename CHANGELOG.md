@@ -15,8 +15,8 @@ merge paths, result and turn crops, undo, resume) and 50/100/200-turn scale runs
   no merge path writes a record that still contains template placeholders.
 - Adopted native forks are named by their session title in the merge/discard dialogs and
   `/ctree status`; decision records carry the real model; two branches off one anchor keep both
-  labels (`⎇ a, ⎇ b`); the merge title counts the branch's own turns; `m` on a trunk with no
-  open branch says so.
+  labels (`⎇ a, ⎇ b`); the merge title counts the branch's own turns from the full transcript
+  (not the 100-message window); `m` on a trunk with no open branch says so.
 - Feedback inside `/tree` goes to a status-line notice: toasts raised from the route never
   reached the screen, so crop, undo and copy confirmations were being lost.
 - Lanes follow the cursor on long sessions. The timeline is laid out in full and the strip shows a
