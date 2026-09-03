@@ -56,6 +56,18 @@ describe("buildTreeView from the trunk", () => {
     const v = buildTreeView({ state: f.state, transcripts, currentSessionID: TRUNK, expanded: new Set(), filter: "default" })
     expect(v.totalTokens).toBe(28_463) // input + cache.read + cache.write + output + reasoning
     expect(v.totalEstimated).toBe(false)
+    // the inspector's Prompt/Reply lines read this off the row itself, not a re-fetched message
+    const row = v.rows.find((r) => r.kind === "step" && r.messageID === cached.id && r.glyph === "○")!
+    expect(row.kind === "step" && row.tokenFields).toEqual({ input: 139, output: 17, reasoning: 44, cacheRead: 28_263, cacheWrite: 0 })
+  })
+
+  test("tokenFields is undefined until the provider actually costs the message", () => {
+    const trunk = f.transcripts[TRUNK]!
+    const uncosted = { ...trunk.messages.at(-1)!, tokens: undefined }
+    const transcripts = { ...f.transcripts, [TRUNK]: { ...trunk, messages: [...trunk.messages.slice(0, -1), uncosted] } }
+    const v = buildTreeView({ state: f.state, transcripts, currentSessionID: TRUNK, expanded: new Set(), filter: "default" })
+    const row = v.rows.find((r) => r.kind === "step" && r.messageID === uncosted.id && r.glyph === "○")!
+    expect(row.kind === "step" && row.tokenFields).toBeUndefined()
   })
   test("the total is only flagged ~ once a chars/4 guess is really part of it", () => {
     const trunk = f.transcripts[TRUNK]!

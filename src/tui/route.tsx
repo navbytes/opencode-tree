@@ -9,8 +9,9 @@ import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from
 import { planJump } from "../core/actions.js"
 import { foldJournal, type TreeState } from "../core/journal.js"
 import { firstIndex, lastIndex, moveSelection, nextBranchIndex, resolveSelection, toggleExpanded } from "../core/navigation.js"
-import { bandFor, contextSizeOf, formatContext, formatK, type MinimalMessage } from "../core/tokens.js"
+import { contextSizeOf, formatContext, formatK, type MinimalMessage } from "../core/tokens.js"
 import { buildSpineMap, buildTreeView, currentChainOf, type Filter, type Row, type StepRow, type TurnRow } from "../core/tree.js"
+import { ContextGauge } from "./gauge.js"
 import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
 import { applyCrop, branchLabel, BRANCH_DIALOG, clip as clipTo, copyText, createNamedBranch, executeJump, executeUndo, mergeBranch, mergeDialogOptions, mergeDialogTitle, mergePickerFigures, MERGE_TRUST, setLabel, UNDO_KEY, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
@@ -36,8 +37,6 @@ export type TreeRouteProps = {
   /** open directly on a secondary view */
   initialView?: "tree" | "decisions"
 }
-
-const BAND_KEY = { low: "success", healthy: "success", filling: "warning", red: "error" } as const
 
 function statusColor(t: TuiPluginApi["theme"]["current"], status: Row & { kind: "branch" }): unknown {
   switch (status.status) {
@@ -560,7 +559,6 @@ export function TreeRoute(props: TreeRouteProps) {
 
   // the same figure the prompt gauge shows: context of the session, not of the drawn rows
   const contextSize = createMemo(() => contextSizeOf((live()?.messages ?? []).map((m): MinimalMessage => ({ info: m.role === "assistant" ? { role: "assistant", tokens: m.tokens } : { role: "user" }, parts: m.parts }))))
-  const band = () => bandFor(contextSize().tokens, contextLimit())
   const branchOfCurrent = () => (sessionID ? state().sessions[sessionID] : undefined)
   const userTurns = () => (live()?.messages ?? []).filter((m) => m.role === "user").length
 
@@ -719,6 +717,13 @@ export function TreeRoute(props: TreeRouteProps) {
     head(`${row.glyph} ${part?.type === "tool" ? part.tool : row.glyph === "◇" ? "compaction" : "assistant"} · T${turn?.kind === "turn" ? turn.turn : "?"} · step ${stepNo}`)
     kv("Hierarchy", `T${turn?.kind === "turn" ? turn.turn : "?"} › assistant › step ${stepNo}`)
     if (!row.inContext) muted("not in this branch's context")
+    if (row.tokenFields) {
+      const tf = row.tokenFields
+      const cached = tf.cacheRead > 0 ? ` · ${formatK(tf.cacheRead)} cached` : ""
+      const written = tf.cacheWrite > 0 ? ` · ${formatK(tf.cacheWrite)} written` : ""
+      kv("Prompt", `${formatK(tf.input + tf.cacheWrite)} fresh${cached}${written}`)
+      kv("Reply", `${formatK(tf.output)} out${tf.reasoning > 0 ? ` · ${formatK(tf.reasoning)} thinking` : ""}`)
+    }
     if (part?.type === "tool") {
       const st = part.state
       const dur = st?.time?.start !== undefined && st?.time?.end !== undefined ? `${st.time.end - st.time.start} ms` : "?"
@@ -1343,7 +1348,7 @@ export function TreeRoute(props: TreeRouteProps) {
       <box flexDirection="row">
         {/* one expression: JSX would trim the gap before the context string */}
         <text fg={t.primary}>{headLine()}</text>
-        <text fg={t[BAND_KEY[band()]]}>{formatContext(contextSize(), contextLimit())}</text>
+        <ContextGauge theme={t} size={contextSize()} limit={contextLimit()} />
       </box>
       <Show when={showLanes()}>
         <box flexDirection="row">

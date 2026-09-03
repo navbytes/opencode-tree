@@ -115,6 +115,13 @@ into entries you can crop in place; `D` renders the decision records; `?` opens 
 | ![consumers](docs/screenshots/consumers.png) | ![decisions](docs/screenshots/decisions.png) |
 | ![help](docs/screenshots/help.png) | ![merge picker](docs/screenshots/merge-picker.png) |
 
+The gauge on the prompt line, here on a caching provider: the context of the next prompt (the same
+figure OpenCode's own sidebar shows), its band, and how much of that prompt the provider served
+from its cache. The bar's dim cells are the cached part; `0% cached` right after a crop, merge or
+fork means the cache was reset.
+
+![gauge with the cache share](docs/screenshots/gauge-cache.png)
+
 ## Try it from source
 
 ```sh

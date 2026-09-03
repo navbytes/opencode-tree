@@ -9,6 +9,11 @@ merge paths, result and turn crops, undo, resume) and 50/100/200-turn scale runs
   providers it showed ~200 when the real context was 28k, which also skewed the bands, the red
   and compaction toasts and the consumers view. It also follows OpenCode's sidebar rule (the last
   assistant reply that produced output tokens), so the two numbers agree.
+- The gauge shows the provider's cache: `· 95% cached` after the band, in muted colour, and the
+  bar's filled cells split into a dim cached part and a bright fresh part. It appears once the
+  provider has reported cache tokens in the session, so a `0% cached` right after a crop, merge
+  or fork means the prompt cache was reset. The sidebar card, `/ctree status` and the inspector
+  show the absolute figures. Limits above a million tokens print as `1.3M`, not `1310.7k`.
 - `/tree` no longer caps the outline at the ~100 most recent messages OpenCode's TUI keeps in
   memory: the current session is fetched in full once per open and merged with the live state,
   so turn 1 is reachable (`gg`) and croppable in a 200-turn session.

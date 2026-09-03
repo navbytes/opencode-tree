@@ -130,6 +130,8 @@ Palette: **Context tree**, **Branch here**, **Merge branch**, **Decisions**, **L
   whole tree — your branch open with `← here`, the rest folded to their `⎇` header (`→` opens one).
 - The Input/Model/Tools lanes and the right-hand inspector (DeepSeek-Harness trajectory) are OFF by
   default so the first screen is the clean outline; `1/2/3` bring in the lanes, `i` the inspector.
+  On an assistant step the inspector also breaks its tokens down: `Prompt 2.3k fresh · 40.4k cached`
+  and `Reply 0.5k out · 0.2k thinking`.
   The lanes are an event strip — one `▬` pill per prompt / model step / tool call on a shared time
   axis, coloured by lane (nothing is scaled by tokens); the row you are on draws inverted.
 - On long sessions the lanes show a window of the timeline: it opens at the newest events, stays
@@ -158,13 +160,18 @@ Palette: **Context tree**, **Branch here**, **Merge branch**, **Decisions**, **L
   Step durations and lane heights are read from the same data — estimated wherever the `~` is.
 - `⚠` ≥10k tokens, `✂` cropped, `✗` tool error, `◆` decision record, `◇` branch summary.
 - A branch you just made says `just branched, nothing here yet` — there is nothing to unfold.
-- The gauge on the prompt line: `⎇ fix-flaky · ctx ~46k/200k · filling ▲+24% (bash)` —
-  absolute bands (<8k low · 8–32k healthy · 32–64k filling · ≥64k red), the jump since the
-  last look and what caused it. One toast when you enter red; one when OpenCode's
+- The gauge on the prompt line: `⎇ fix-flaky · ctx ▓▓░░░ ~46k/200k · filling · 95% cached
+  ▲+24% (bash)` — the context of the next prompt (the same figure as OpenCode's own sidebar),
+  bands relative to the model's window (<25% low · <60% healthy · <85% filling · red; absolute
+  8k/32k/64k when the window is unknown), how much of that prompt the provider served from its
+  cache (shown once the provider reports cache tokens; the bar's dim cells are the cached part,
+  and `0% cached` right after a crop, merge or fork means the cache was reset), then the jump
+  since the last look and what caused it. One toast when you enter red; one when OpenCode's
   auto-compaction is near.
 - The sidebar card, under a **Context tree** heading: `⎇ <branch>` and, on its own line,
   `open · from "<the session you forked>"` — or `trunk · 2 branches` when you are on the
-  trunk. Active crops add `✂ 2 crops · ~31k hidden`; last line is the `/tree · ctrl+q` hint.
+  trunk. Active crops add `✂ 2 crops · ~31k hidden`, caching providers add `40.4k cached of
+  42.7k (95%)`; last line is the `/tree · ctrl+q` hint.
 
 ## Headless (desktop / web / scripts)
 
