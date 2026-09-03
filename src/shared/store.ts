@@ -91,8 +91,7 @@ export class JournalStore {
    */
   private withRegistryLock<T>(fn: () => T): T {
     const lockPath = `${this.registryPath()}.lock`
-    const startedAt = Date.now()
-    const deadline = startedAt + LOCK_TIMEOUT_MS
+    const deadline = Date.now() + LOCK_TIMEOUT_MS
     let fd: number | undefined
     let broke = false
     for (;;) {
@@ -113,7 +112,9 @@ export class JournalStore {
           // the whole window has passed: a lock that predates our wait belongs to a dead
           // holder (the critical section is one small write), so break it instead of
           // leaving it to tax every later write with another full wait
-          if (lockMtimeMs(lockPath) <= startedAt) {
+          // mtimeMs is sub-millisecond while Date.now() is not, so "predates our start" can
+          // miss a same-millisecond lock; "held longer than any critical section" cannot
+          if (lockMtimeMs(lockPath) <= Date.now() - 10) {
             try {
               fs.unlinkSync(lockPath)
             } catch {}
