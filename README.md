@@ -26,7 +26,9 @@ opencode plugin opencode-context-tree        # for the current project only (.op
 ```
 
 Restart OpenCode. `/tree` (or `ctrl+q`) opens the tree; `/branch`, `/merge`, `/decisions` and the
-headless `/ctree` commands are available too.
+headless `/ctree` commands are available too. The trajectory panels are off by default so the
+first screen is the plain tree: inside `/tree` press `1`, `2` or `3` for the Input/Model/Tools
+timeline (`0` hides it) and `i` for the inspector.
 
 If you only see `/ctree` and no `/tree`, the TUI half is not registered: run the command above.
 To register by hand instead, the package name must be listed in **both** files:
