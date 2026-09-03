@@ -646,9 +646,11 @@ function computeTotalTokens(transcript: Transcript): { tokens: number; estimated
   let lastIndex = -1
   let lastPrompt = 0
   transcript.messages.forEach((m, idx) => {
-    if (m.role === "assistant" && typeof m.tokens?.input === "number") {
+    // matches OpenCode's own sidebar gauge / tokens.ts's contextSizeOf: skip a turn with no
+    // output yet in favor of the last one that finished
+    if (m.role === "assistant" && typeof m.tokens?.output === "number" && m.tokens.output > 0) {
       lastIndex = idx
-      lastPrompt = m.tokens.input + (m.tokens.cache?.read ?? 0) + (m.tokens.cache?.write ?? 0)
+      lastPrompt = (m.tokens.input ?? 0) + (m.tokens.cache?.read ?? 0) + (m.tokens.cache?.write ?? 0)
     }
   })
 

@@ -312,7 +312,7 @@ export async function executeUndo(ctx: ActionContext, sessionID: string, plan: U
       record(ctx, treeId, "crop.restored", { cropID: plan.cropID })
       const crop = ctx.store.stateFor(treeId).crops[plan.cropID]
       if (crop && crop.mode === "result") await setCompacted(ctx, sessionID, crop.targets.map((t) => ({ messageID: t.messageID, partID: t.partID })), undefined)
-      notify(ctx, { variant: "success", message: `↶ restored ${plan.mode === "turn" ? "dropped turn" : "cropped result"} (~${Math.round(plan.estTokens / 100) / 10}k tokens back in context)` })
+      notify(ctx, { variant: "success", message: `↶ restored ${plan.mode === "turn" ? "dropped turn" : "cropped result"} (~${formatK(plan.estTokens)} tokens back in context)` })
       return undefined
     }
     case "abandon-branch": {
@@ -570,8 +570,8 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
   debug("merge.drafted", { chars: draft.length })
 
   // --- gate ----------------------------------------------------------------
-  const confirm = input.confirm ?? (typed ? async (d: string) => d : (d: string) => editInExternalEditor(ctx.api.renderer as any, d, ctx.directory, MERGE_GATE_NOTICE))
-  if (!input.confirm && !typed && !hasEditor()) throw new Error("no $EDITOR configured — set VISUAL/EDITOR, or use the in-app confirm")
+  if (!typed && !input.confirm && !hasEditor()) throw new Error("no $EDITOR configured — set VISUAL/EDITOR, or use the in-app confirm")
+  const confirm = typed ? async (d: string) => d : (input.confirm ?? ((d: string) => editInExternalEditor(ctx.api.renderer as any, d, ctx.directory, MERGE_GATE_NOTICE)))
   const confirmed = await confirm(draft)
   if (!confirmed) {
     notify(ctx, { variant: "warning", message: "merge aborted — nothing written" })

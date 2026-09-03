@@ -12,7 +12,7 @@ const msg = (role: "user" | "assistant", text: string, tokens?: number): Transcr
   id: `${role}-${text.slice(0, 4)}`,
   role,
   time: { created: 0 },
-  tokens: tokens === undefined ? undefined : { input: tokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  tokens: tokens === undefined ? undefined : { input: tokens - 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
   parts: [{ id: `p-${text.slice(0, 4)}`, type: "text", text }],
 })
 
@@ -200,6 +200,35 @@ describe("mergeBranch: squash without an LLM", () => {
     } finally {
       filled.cleanup()
       escaped.cleanup()
+    }
+  })
+
+  test("the typed path never opens the caller's accept-drafted dialog, and still refuses placeholder text", async () => {
+    // route.tsx/index.tsx always pass a `confirm` (their "Accept the drafted record as-is?"
+    // dialog) whenever there's no $EDITOR — this stands in for it, so a call means the gate reopened
+    let confirmCalls = 0
+    const spyConfirm = async (draft: string) => {
+      confirmCalls++
+      return draft
+    }
+    const filled = fakeMerge(["Kept the in-memory cache.", "the set is small; CI stays fast"])
+    const placeholder = fakeMerge(["<traps found on the way>", ""])
+    try {
+      await withEditor(false, async () => {
+        expect(await mergeBranch(filled.ctx, { sessionID: BRANCH, mode: "squash-no-llm", confirm: spyConfirm })).toBe(PARENT)
+        expect(confirmCalls).toBe(0)
+        expect(filled.landed).toHaveLength(1)
+        expect(filled.ctx.store.stateFor(filled.treeId).sessions[BRANCH]!.status).toBe("squashed")
+
+        expect(await mergeBranch(placeholder.ctx, { sessionID: BRANCH, mode: "squash-no-llm", confirm: spyConfirm })).toBeUndefined()
+        expect(confirmCalls).toBe(0)
+        expect(placeholder.landed).toEqual([])
+        expect(placeholder.toasts.at(-1)).toBe("record not written: fill in the template")
+        expect(placeholder.ctx.store.stateFor(placeholder.treeId).sessions[BRANCH]!.status).toBe("open")
+      })
+    } finally {
+      filled.cleanup()
+      placeholder.cleanup()
     }
   })
 })

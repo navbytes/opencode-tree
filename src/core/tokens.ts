@@ -59,9 +59,11 @@ export function contextSizeOf(messages: MinimalMessage[]): { tokens: number; est
   let lastAssistantPrompt = 0
   for (let i = 0; i < messages.length; i++) {
     const info = messages[i]!.info
-    if (info.role === "assistant" && typeof info.tokens?.input === "number") {
+    // matches OpenCode's own sidebar gauge: skip a turn with no output yet (e.g. a
+    // reasoning-only turn still in flight) in favor of the last one that finished
+    if (info.role === "assistant" && typeof info.tokens?.output === "number" && info.tokens.output > 0) {
       lastAssistantIndex = i
-      lastAssistantPrompt = info.tokens.input + (info.tokens.cache?.read ?? 0) + (info.tokens.cache?.write ?? 0)
+      lastAssistantPrompt = (info.tokens.input ?? 0) + (info.tokens.cache?.read ?? 0) + (info.tokens.cache?.write ?? 0)
     }
   }
 

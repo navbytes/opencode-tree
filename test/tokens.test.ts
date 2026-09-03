@@ -49,29 +49,47 @@ describe("contextSizeOf", () => {
   test("uses the last assistant turn's real tokens.input, plus its own output", () => {
     const messages: MinimalMessage[] = [
       { info: { role: "user" }, parts: [{ type: "text", text: "hi" }] },
-      { info: { role: "assistant", tokens: { input: 4600 } }, parts: [{ type: "text", text: "a".repeat(400) }] }, // +100
+      { info: { role: "assistant", tokens: { input: 4600, output: 100 } }, parts: [{ type: "text", text: "a".repeat(400) }] },
     ]
     const size = contextSizeOf(messages)
-    expect(size.tokens).toBe(4700)
-    expect(size.estimated).toBe(true)
+    expect(size.tokens).toBe(4700) // input + its own real output; the generated text is not also chars/4'd
+    expect(size.estimated).toBe(false)
   })
 
   test("an empty last assistant turn is the real figure, unestimated", () => {
     const messages: MinimalMessage[] = [
       { info: { role: "user" }, parts: [{ type: "text", text: "hi" }] },
-      { info: { role: "assistant", tokens: { input: 4600 } }, parts: [] },
+      { info: { role: "assistant", tokens: { input: 4600, output: 20 } }, parts: [] },
     ]
-    expect(contextSizeOf(messages)).toEqual({ tokens: 4600, estimated: false })
+    expect(contextSizeOf(messages)).toEqual({ tokens: 4620, estimated: false })
   })
 
   test("adds chars/4 for parts newer than the last assistant turn", () => {
     const messages: MinimalMessage[] = [
-      { info: { role: "assistant", tokens: { input: 4600 } }, parts: [] },
+      { info: { role: "assistant", tokens: { input: 4600, output: 20 } }, parts: [] },
       { info: { role: "user" }, parts: [{ type: "text", text: "a".repeat(400) }] }, // +100
     ]
     const size = contextSizeOf(messages)
-    expect(size.tokens).toBe(4700)
+    expect(size.tokens).toBe(4720) // 4600 input + 20 output + 100 guessed for the newer user turn
     expect(size.estimated).toBe(true)
+  })
+
+  test("skips a trailing assistant turn with no output yet, like OpenCode's own sidebar gauge", () => {
+    const messages: MinimalMessage[] = [
+      { info: { role: "user" }, parts: [{ type: "text", text: "hi" }] },
+      {
+        info: { role: "assistant", tokens: { input: 5000, output: 500, reasoning: 30, cache: { read: 4750, write: 0 } } },
+        parts: [{ type: "text", text: "first answer" }],
+      },
+      { info: { role: "user" }, parts: [{ type: "text", text: "and now?" }] }, // +2
+      {
+        info: { role: "assistant", tokens: { input: 200, output: 0, cache: { read: 9800, write: 0 } } },
+        parts: [{ type: "tool", tool: "bash", state: { input: { command: "ls" }, output: "ok" } }], // +6
+      },
+    ]
+    // the earlier turn's five-field sum (5000+500+30+4750 = 10280, what OpenCode's sidebar shows
+    // too) plus chars/4 for everything newer: the next user turn and the trailing 0-output tool call
+    expect(contextSizeOf(messages)).toEqual({ tokens: 10_288, estimated: true })
   })
 
   test("estimates everything when no assistant turn has run yet", () => {
@@ -104,13 +122,13 @@ describe("contextSizeOf", () => {
   })
 
   test("cache.write counts too — the turn that filled the cache still sent those tokens", () => {
-    const messages: MinimalMessage[] = [{ info: { role: "assistant", tokens: { input: 100, output: 0, reasoning: 0, cache: { read: 0, write: 4000 } } }, parts: [] }]
-    expect(contextSizeOf(messages)).toEqual({ tokens: 4100, estimated: false })
+    const messages: MinimalMessage[] = [{ info: { role: "assistant", tokens: { input: 100, output: 1, reasoning: 0, cache: { read: 0, write: 4000 } } }, parts: [] }]
+    expect(contextSizeOf(messages)).toEqual({ tokens: 4101, estimated: false })
   })
 
   test("includes tool input/output text in the newer-parts estimate", () => {
     const messages: MinimalMessage[] = [
-      { info: { role: "assistant", tokens: { input: 100 } }, parts: [] },
+      { info: { role: "assistant", tokens: { input: 100, output: 1 } }, parts: [] },
       {
         info: { role: "assistant" },
         parts: [{ type: "tool", tool: "bash", state: { input: { command: "ls" }, output: "a".repeat(40) } }],

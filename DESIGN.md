@@ -163,7 +163,7 @@ export default { id: "opencode-context-tree", tui: async (api, options, meta) =>
 - `tool` parts: `state.time.{start,end}` → duration; `state.input`/`output`/`title`;
   `callID`; `tool` name.
 - `text`/`reasoning` parts: `time.{start,end}`.
-- Everything after the last assistant turn is estimated at chars/4 and shown with `~`.
+- Everything after the last assistant turn that produced output tokens is estimated at chars/4 and shown with `~`.
 
 ---
 
@@ -401,7 +401,9 @@ reverts it as described in 6.2–6.5, with a confirm naming what will happen
 > `ctx ▓▓░░░ ~2.3k/32.8k · low`, from one helper (`formatContext`).
 
 `session_prompt_right` slot: `ctx 46k/200k ▓▓▓▓░░ filling ▲+24% (bash)` coloured by
-absolute band (<8k · 8–32k · 32–64k · ≥64k), from the last assistant `tokens.input`
+band relative to the model limit (<25% · <60% · <85% · red; absolute <8k · 8–32k · 32–64k · ≥64k
+when the limit is unknown), from the last assistant reply with output tokens:
+`input + output + reasoning + cache.read + cache.write`, OpenCode's own sidebar rule
 (+ chars/4 for anything newer, shown as `~`), attribution = the biggest new part since
 the last turn. One-time toast when entering red; a separate warning when within the
 compaction reserve (`model.limit.context − compaction.reserved`), because OpenCode's
