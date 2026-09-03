@@ -46,5 +46,3 @@ jobs:
       # OIDC trusted publishing needs the package to already exist on npm: the very first
       # version of a new package is published once by hand, every later one lands here.
       - run: npm publish --provenance --access public
-        env:
-          NPM_CONFIG_LOGLEVEL: verbose   # temporary: show the OIDC token exchange result
