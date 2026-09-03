@@ -50,6 +50,10 @@ opencode plugin opencode-context-tree@0.2.0 -g --force     # or without -g for t
 or delete `~/.cache/opencode/packages/opencode-context-tree@latest` and restart. `?` in `/tree`
 and `/ctree status` show the version you are running.
 
+**Cost of the plugin itself:** `/tree` opens in about 35 ms whether the session has 57 or 467
+messages, the crop transform adds under a millisecond to each model request, and the TUI grows by
+about 37 MB (measured; see [docs/USAGE.md](docs/USAGE.md#performance)).
+
 Options go in either file: `[["opencode-context-tree", { "storage": "global", "jumpSummary": "never" }]]`
 (see [docs/USAGE.md](docs/USAGE.md)). To hack on it from a checkout, see "Try it from source" below.
 
