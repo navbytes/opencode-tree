@@ -612,6 +612,8 @@ packages/
 | Very long sessions (>2k messages) | `session.messages` is paged (`limit`/`before`); the route loads the active session fully and other branches lazily on expand (as `opencode-tree` does). |
 | OpenCode v2 (`opencode2`, next) | TUI plugin loading from `tui.json` is currently broken there (#36525); v2 adds `session.context`, staged reverts, `SessionMessageCompaction`. Keep `core` free of SDK types and put the v1↔v2 mapping in `server`/`tui` adapters. |
 
+"Toast" above means OpenCode's toast when the action runs from the palette or after the route has navigated away; inside `/tree` the same message goes to the route's status-line notice, because toasts raised while the route is mounted never render.
+
 ---
 
 ## 10. Comparison
