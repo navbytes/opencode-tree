@@ -324,7 +324,11 @@ describe.skipIf(!e2e)("server e2e: built plugin headless /ctree commands", () =>
     mock.clearRequests()
     unwrap(await server.client.session.command({ path: { id: session.id }, query: { directory: server.dir }, body: { command: "ctree", arguments: "status" } }))
     const last = mock.requests().at(-1)!.body.messages as { role: string; content: unknown }[]
-    expect(String(last.filter((m) => m.role === "user").at(-1)!.content)).toContain("1 branch(es)")
+    const status = String(last.filter((m) => m.role === "user").at(-1)!.content)
+    expect(status).toContain("1 branch(es)")
+    // an adopted fork has no journal name: status names it by title, never by raw session id
+    expect(status).toContain(`${fork.title} [open]`)
+    expect(status).not.toContain(fork.id)
 
     const journalDir = path.join(server.dir, ".opencode", "context-tree")
     const journal = readdirSync(journalDir).map((f) => readFileSync(path.join(journalDir, f), "utf8")).join("")

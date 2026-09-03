@@ -48,6 +48,15 @@ describe("buildTreeView from the trunk", () => {
     expect(view.totalTokens).toBe(3010) // a3's tokens.input + its own tokens.output
     expect(view.totalEstimated).toBe(false) // the provider counted every token in it
   })
+  test("the total counts the last turn's cached prompt tokens, not just tokens.input", () => {
+    const trunk = f.transcripts[TRUNK]!
+    // the a3 turn as a caching provider reports it: 28.3k of the prefix came back from cache
+    const cached = { ...trunk.messages.at(-1)!, tokens: { input: 139, output: 17, reasoning: 44, cache: { read: 28_263, write: 0 } } }
+    const transcripts = { ...f.transcripts, [TRUNK]: { ...trunk, messages: [...trunk.messages.slice(0, -1), cached] } }
+    const v = buildTreeView({ state: f.state, transcripts, currentSessionID: TRUNK, expanded: new Set(), filter: "default" })
+    expect(v.totalTokens).toBe(28_463) // input + cache.read + cache.write + output + reasoning
+    expect(v.totalEstimated).toBe(false)
+  })
   test("the total is only flagged ~ once a chars/4 guess is really part of it", () => {
     const trunk = f.transcripts[TRUNK]!
     const pending = { ...f.transcripts, [TRUNK]: { ...trunk, messages: [...trunk.messages, user("m4", "and now?")] } }

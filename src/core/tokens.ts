@@ -46,20 +46,22 @@ function partText(part: MinimalPart): string {
 }
 
 /**
- * Context size of a session's message list: the last assistant turn's real
- * `tokens.input`, plus a chars/4 estimate of everything the next request will add on
- * top of it — that turn's own output and tool results included (DESIGN.md §3.3 /
- * §6.7). Returns `{ tokens, estimated }`; `estimated` is true whenever any part of
- * the figure is a chars/4 guess.
+ * Context size of a session's message list: the last assistant turn's whole prompt —
+ * `tokens.input` *plus* `cache.read`/`cache.write`, since a cache hit is context the model
+ * still held, only cheaper (same sum as OpenCode's own sidebar gauge) — plus what the next
+ * request adds on top of it: that turn's own output/reasoning when the provider counted them,
+ * and a chars/4 estimate of everything else, tool results included (DESIGN.md §3.3 / §6.7).
+ * Returns `{ tokens, estimated }`; `estimated` is true whenever any part of the figure is a
+ * chars/4 guess.
  */
 export function contextSizeOf(messages: MinimalMessage[]): { tokens: number; estimated: boolean } {
   let lastAssistantIndex = -1
-  let lastAssistantInput = 0
+  let lastAssistantPrompt = 0
   for (let i = 0; i < messages.length; i++) {
     const info = messages[i]!.info
     if (info.role === "assistant" && typeof info.tokens?.input === "number") {
       lastAssistantIndex = i
-      lastAssistantInput = info.tokens.input
+      lastAssistantPrompt = info.tokens.input + (info.tokens.cache?.read ?? 0) + (info.tokens.cache?.write ?? 0)
     }
   }
 
@@ -72,14 +74,20 @@ export function contextSizeOf(messages: MinimalMessage[]): { tokens: number; est
     return { tokens: estimated, estimated: true }
   }
 
-  // starts AT the last assistant: its `tokens.input` is the context it was *given*, so its
-  // own output and tool results are only in the context from the next request on.
-  let newer = 0
+  // starts AT the last assistant: its prompt is the context it was *given*, so its own
+  // output and tool results are only in the context from the next request on.
+  let counted = 0
+  let guessed = 0
   for (let i = lastAssistantIndex; i < messages.length; i++) {
-    for (const part of messages[i]!.parts) newer += estimateTokens(partText(part))
+    const message = messages[i]!
+    const tokens = message.info.role === "assistant" ? message.info.tokens : undefined
+    // `tokens.output` covers what the model generated, never the tool results it read back
+    const output = tokens?.output
+    if (typeof output === "number") counted += output + (tokens?.reasoning ?? 0)
+    for (const part of message.parts) if (part.type === "tool" || typeof output !== "number") guessed += estimateTokens(partText(part))
   }
 
-  return { tokens: lastAssistantInput + newer, estimated: newer > 0 }
+  return { tokens: lastAssistantPrompt + counted + guessed, estimated: guessed > 0 }
 }
 
 export type ContextBand = "low" | "healthy" | "filling" | "red"

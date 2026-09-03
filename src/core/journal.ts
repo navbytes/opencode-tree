@@ -335,6 +335,15 @@ export function foldJournal(entries: JournalEntry[], treeId = "default"): TreeSt
   }
 }
 
+/** The label to write when a branch is opened at a message that may already carry one.
+ *  `label.set` *replaces* the label for a message, so two branches off one anchor have to
+ *  write the combined string (`⎇ a, ⎇ b`) or the second silently drops the first. */
+export function withBranchLabel(existing: string | undefined, name: string): string {
+  const tag = `⎇ ${name}`
+  const parts = (existing ?? "").split(",").map((p) => p.trim()).filter(Boolean)
+  return parts.includes(tag) ? parts.join(", ") : [...parts, tag].join(", ")
+}
+
 /** Active (non-restored) crops for a given session, in application order. */
 export function activeCrops(state: TreeState, sessionID: string): CropState[] {
   return Object.values(state.crops)

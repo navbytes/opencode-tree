@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { branchTranscriptText, buildDecisionDraftPrompt, decisionMessageText, decisionSummary, decisionTemplate, exportDecisions, openSiblings, renderDecision } from "../src/core/decision.js"
+import { branchTranscriptText, buildDecisionDraftPrompt, decisionMessageText, decisionRecord, decisionSummary, decisionTemplate, exportDecisions, openSiblings, renderDecision, templatePlaceholders } from "../src/core/decision.js"
 import { buildFixture, OPEN, SQUASHED, TRUNK } from "./fixtures/tree.js"
 
 describe("decision records", () => {
@@ -9,6 +9,17 @@ describe("decision records", () => {
     expect(t).toContain("## Decision: fix-flaky")
     expect(t).toContain("**Date:** 2026-09-02 · **Model:** mock/mock-b")
     for (const h of ["Outcome", "Why", "Assumptions", "Changes", "Gotchas", "Open questions", "Confidence", "Rejected alternatives"]) expect(t).toContain(h)
+  })
+  test("an unfilled template is caught, a written record and code-like angle brackets are not", () => {
+    expect(templatePlaceholders(decisionTemplate("fix-flaky", "mock/mock-b")).length).toBeGreaterThan(0)
+    expect(templatePlaceholders("**Outcome:** <1–3 sentences: what was concluded / built>")).toEqual(["<1–3 sentences: what was concluded / built>"])
+    expect(templatePlaceholders("**Outcome:** kept `Array<string>`; dropped the <div> wrapper")).toEqual([])
+  })
+  test("a record typed into the dialogs carries the answered fields only, no placeholders", () => {
+    const r = decisionRecord({ branchName: "fix-flaky", model: "mock/mock-b", outcome: "  Kept the in-memory cache.  ", why: "the set is small; CI stays fast", date: new Date("2026-09-02T00:00:00Z") })
+    expect(r).toBe("## Decision: fix-flaky\n**Date:** 2026-09-02 · **Model:** mock/mock-b · **Branch:** fix-flaky\n**Outcome:** Kept the in-memory cache.\n**Why:**\n- the set is small\n- CI stays fast\n")
+    expect(templatePlaceholders(r)).toEqual([])
+    expect(decisionRecord({ branchName: "a", outcome: "x", why: "  " })).not.toContain("**Why:**")
   })
   const parentMessageIDs = f.transcripts[TRUNK]!.messages.map((m) => m.id)
   test("branch transcript starts after the anchor and truncates tool output", () => {

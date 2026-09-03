@@ -13,7 +13,7 @@ import { bandFor, contextSizeOf, formatContext, formatK, type MinimalMessage } f
 import { buildSpineMap, buildTreeView, currentChainOf, type Filter, type Row, type StepRow, type TurnRow } from "../core/tree.js"
 import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
-import { applyCrop, BRANCH_DIALOG, clip as clipTo, copyText, createNamedBranch, executeJump, executeUndo, mergeBranch, mergeDialogOptions, mergeDialogTitle, mergeTargetOf, MERGE_TRUST, ownTurnCount, setLabel, TRUNK_LABEL, UNDO_KEY, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
+import { applyCrop, branchLabel, BRANCH_DIALOG, clip as clipTo, copyText, createNamedBranch, executeJump, executeUndo, mergeBranch, mergeDialogOptions, mergeDialogTitle, mergePickerFigures, MERGE_TRUST, setLabel, UNDO_KEY, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
 import { decisionSummary, exportDecisions, renderDecision } from "../core/decision.js"
 import { layoutEventStrip, overviewTrack, stripIndexFor, windowFor, type LaneMode, type StripCell } from "../core/lanes.js"
 import { bar, consumers, type Consumer, type ConsumerEntry } from "../core/consumers.js"
@@ -22,7 +22,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { autoMark, planResultCrop, planTurnCrops, reclaimed, resultCandidates, turnCandidates, type ResultCandidate, type TurnCandidate } from "../core/cropplan.js"
 import { planUndo } from "../core/undo.js"
-import { fetchTranscript, liveTranscript, modelContextLimit } from "./transcripts.js"
+import { fetchTranscript, liveTranscript, mergeTranscripts, modelContextLimit } from "./transcripts.js"
 import { debug } from "../shared/debug.js"
 
 export type TreeRouteProps = {
@@ -263,6 +263,17 @@ export function TreeRoute(props: TreeRouteProps) {
   const [decisionScroll, setDecisionScroll] = createSignal(0)
   const [marked, setMarked] = createSignal<Set<string>>(new Set())
 
+  // `api.ui.toast` draws in the session chrome this route replaces, so a toast raised from here
+  // is never seen: route-level feedback goes to the status line instead.
+  const [notice, setNotice] = createSignal<string | undefined>()
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined
+  const notify = (message: string) => {
+    setNotice(message)
+    clearTimeout(noticeTimer)
+    noticeTimer = setTimeout(() => setNotice(undefined), 4000)
+  }
+  onCleanup(() => clearTimeout(noticeTimer))
+
   const state = createMemo<TreeState>(() => {
     tick()
     return (sessionID && store.stateForSession(sessionID)) || foldJournal([], "none")
@@ -300,7 +311,24 @@ export function TreeRoute(props: TreeRouteProps) {
     }),
   )
 
-  const transcripts = createMemo(() => (sessionID ? { ...others(), [sessionID]: liveTranscript(api, sessionID) } : {}))
+  // The current session's full history (api.state stops at OpenCode's last page — see
+  // mergeTranscripts). Refetched per tick so crops/merges that remove messages are reflected.
+  const [selfFull, setSelfFull] = createSignal<Transcript | undefined>()
+  let selfSeq = 0
+  createEffect(
+    on([state, tick], async () => {
+      if (!sessionID) return
+      const seq = ++selfSeq
+      const t0 = performance.now()
+      const tr = await fetchTranscript(api, sessionID, directory)
+      if (seq !== selfSeq || tr.status !== "available") return
+      debug("route.selfTranscript", { messages: tr.messages.length, ms: Math.round(performance.now() - t0) })
+      setSelfFull(tr)
+    }),
+  )
+
+  const live = createMemo(() => (sessionID ? mergeTranscripts(selfFull(), liveTranscript(api, sessionID)) : undefined))
+  const transcripts = createMemo(() => (sessionID ? { ...others(), [sessionID]: live()! } : {}))
   const spine = createMemo(() => buildSpineMap({ state: state(), transcripts: transcripts(), currentSessionID: sessionID ?? "" }))
 
   const view = createMemo(() => {
@@ -362,8 +390,6 @@ export function TreeRoute(props: TreeRouteProps) {
   const helpHeight = () => (panel() === "help" ? Math.min(HELP.length, Math.max(0, size().rows - 12)) : 0)
   const width = () => Math.max(60, cols() - 4)
   // ---- lane geometry (the lanes themselves are further down) ----------------
-  // `height()` budgets rows for the lanes, so the axis and its overview row exist before it.
-  const live = () => (sessionID ? liveTranscript(api, sessionID) : undefined)
   // 61 = the 12-cell label column + the `N…` cue + the mode legend that follows the Input lane
   const laneWidth = () => Math.max(10, Math.min(width() - 61, 80))
   const layout = createMemo(() => layoutEventStrip(live() ?? EMPTY_TRANSCRIPT, laneMode()))
@@ -1009,14 +1035,12 @@ export function TreeRoute(props: TreeRouteProps) {
     if (!sessionID) return
     const b = branchOfCurrent()
     if (!b || b.status !== "open") {
-      api.ui.toast({ message: "not on an open branch — /branch first, or open the tree from a branch" })
+      notify(b ? `⎇ ${branchLabel(api, sessionID, b.name, 24)} is already ${b.status}` : "no open branch to merge · b starts one")
       return
     }
     const siblings = Object.values(state().sessions).filter((x) => x.parentSessionID === b.parentSessionID && x.sessionID !== sessionID && x.status === "open").length
-    const parent = others()[b.parentSessionID]
-    const target = mergeTargetOf(b.parentSessionID === state().root ? TRUNK_LABEL : (state().sessions[b.parentSessionID]?.name ?? TRUNK_LABEL), parent?.messages ?? [])
-    const turns = ownTurnCount(live()?.messages ?? [], { messageID: b.anchorMessageID, parentMessageIDs: parent?.messages.map((m) => m.id) ?? [] })
-    const mode = await select<MergeMode>(mergeDialogTitle(b.name ?? "branch", target), mergeDialogOptions({ siblings, turns }))
+    const { turns, target } = await mergePickerFigures(ctx, state(), sessionID)
+    const mode = await select<MergeMode>(mergeDialogTitle(branchLabel(api, sessionID, b.name), target, turns), mergeDialogOptions({ siblings, turns }))
     if (!mode) return
     const inApp = !hasEditor()
       ? async (draft: string) => {
@@ -1281,6 +1305,8 @@ export function TreeRoute(props: TreeRouteProps) {
       return `✂ crop mode (${cropMode()}) · space mark · a auto · t result⇄turn · ⏎ apply · esc leave · marked ${selectedCandidates().length} ~${formatK(reclaimed(selectedCandidates()))}${a ? " · armed — space again to override" : ""}`
     }
     if (searchMode()) return `search: ${search()}▏ · ${pos} rows · ⏎ keeps it · esc clears`
+    const said = notice()
+    if (said) return `${said}   ${pos} rows`
     return `filter: ${filter()}${search() ? `   search: "${search()}"` : ""}${busy() ? `   … ${busy()}` : ""}   ${pos} rows`
   }
 

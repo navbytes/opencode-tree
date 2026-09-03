@@ -81,6 +81,33 @@ describe("contextSizeOf", () => {
     expect(size.estimated).toBe(true)
   })
 
+  test("counts cached prompt tokens: a cache hit is context the model still held", () => {
+    // observed on a caching provider: the gauge read ~200 while 28.3k of prefix came back cached
+    const messages: MinimalMessage[] = [
+      { info: { role: "user" }, parts: [{ type: "text", text: "and now?" }] },
+      {
+        info: { role: "assistant", tokens: { input: 139, output: 17, reasoning: 44, cache: { read: 28_263, write: 0 } } },
+        parts: [{ type: "reasoning", text: "a".repeat(176) }, { type: "text", text: "b".repeat(68) }],
+      },
+    ]
+    // input + cache.read + cache.write + output + reasoning — the provider counted all of it,
+    // so the generated parts are never chars/4'd on top
+    expect(contextSizeOf(messages)).toEqual({ tokens: 28_463, estimated: false })
+  })
+
+  test("a fresh branch whose whole prefix was a cache hit is not an empty context", () => {
+    const messages: MinimalMessage[] = [
+      { info: { role: "user" }, parts: [] },
+      { info: { role: "assistant", tokens: { input: 0, output: 512, reasoning: 88, cache: { read: 56_700, write: 0 } } }, parts: [] },
+    ]
+    expect(formatContext(contextSizeOf(messages), 262_144)).toBe("ctx ▓░░░░ 57.3k/262.1k · low")
+  })
+
+  test("cache.write counts too — the turn that filled the cache still sent those tokens", () => {
+    const messages: MinimalMessage[] = [{ info: { role: "assistant", tokens: { input: 100, output: 0, reasoning: 0, cache: { read: 0, write: 4000 } } }, parts: [] }]
+    expect(contextSizeOf(messages)).toEqual({ tokens: 4100, estimated: false })
+  })
+
   test("includes tool input/output text in the newer-parts estimate", () => {
     const messages: MinimalMessage[] = [
       { info: { role: "assistant", tokens: { input: 100 } }, parts: [] },

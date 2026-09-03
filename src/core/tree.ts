@@ -637,21 +637,22 @@ function applySearch(rows: Row[], search: string): Row[] {
 // Total tokens.
 // ---------------------------------------------------------------------------
 
-/** Last assistant `tokens.input` in the current session, plus what the next request adds
- *  on top of it — that turn's own output (exact when the provider counted it) and its tool
+/** The last assistant turn's whole prompt in the current session — `tokens.input` *plus* the
+ *  cached prompt tokens, which the model still had to hold — and what the next request adds on
+ *  top of it: that turn's own output/reasoning (exact when the provider counted it) and its tool
  *  results (always chars/4) — following `tokens.ts`'s `contextSizeOf` (DESIGN.md §3.3 /
  *  §6.7). `estimated` is true only when a guess really is part of the figure. */
 function computeTotalTokens(transcript: Transcript): { tokens: number; estimated: boolean } {
   let lastIndex = -1
-  let lastInput = 0
+  let lastPrompt = 0
   transcript.messages.forEach((m, idx) => {
     if (m.role === "assistant" && typeof m.tokens?.input === "number") {
       lastIndex = idx
-      lastInput = m.tokens.input
+      lastPrompt = m.tokens.input + (m.tokens.cache?.read ?? 0) + (m.tokens.cache?.write ?? 0)
     }
   })
 
-  // starts AT the last assistant: its `tokens.input` is the context it was *given*
+  // starts AT the last assistant: its prompt is the context it was *given*
   let counted = 0
   let guessed = 0
   for (let i = Math.max(lastIndex, 0); i < transcript.messages.length; i++) {
@@ -662,11 +663,11 @@ function computeTotalTokens(transcript: Transcript): { tokens: number; estimated
     }
     // `tokens.output` covers what the model generated, never the tool results it read back
     const output = m.tokens?.output
-    if (typeof output === "number") counted += output
+    if (typeof output === "number") counted += output + (m.tokens?.reasoning ?? 0)
     for (const p of m.parts) if (p.type === "tool" || typeof output !== "number") guessed += estimateTokens(partText(p))
   }
 
-  return { tokens: lastInput + counted + guessed, estimated: lastIndex === -1 || guessed > 0 }
+  return { tokens: lastPrompt + counted + guessed, estimated: lastIndex === -1 || guessed > 0 }
 }
 
 // ---------------------------------------------------------------------------

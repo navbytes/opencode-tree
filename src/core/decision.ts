@@ -8,9 +8,12 @@ import type { Transcript, TranscriptMessage } from "./transcript.js"
 export const DECISION_SYSTEM =
   "You write concise engineering decision records. You are given the transcript of a side branch of a coding session. Do NOT continue the conversation. Output ONLY the record in the exact markdown template requested, nothing else."
 
+function recordHead(branchName: string, model: string | undefined, date: Date): string {
+  return `## Decision: ${branchName}\n**Date:** ${date.toISOString().slice(0, 10)} · **Model:** ${model ?? "unknown"} · **Branch:** ${branchName}`
+}
+
 export function decisionTemplate(branchName: string, model?: string, date = new Date()): string {
-  return `## Decision: ${branchName}
-**Date:** ${date.toISOString().slice(0, 10)} · **Model:** ${model ?? "unknown"} · **Branch:** ${branchName}
+  return `${recordHead(branchName, model, date)}
 **Outcome:** <1–3 sentences: what was concluded / built>
 **Why:** 
 - <≤5 bullets>
@@ -22,6 +25,24 @@ export function decisionTemplate(branchName: string, model?: string, date = new 
 
 ### Rejected alternatives
 - **<name>:** <one-line reason>
+`
+}
+
+/** The `<…>` slots `decisionTemplate` leaves for a human to replace. Matched verbatim, so a
+ *  record that legitimately quotes `<html>` or `Array<T>` is never read as an unfilled one. */
+const PLACEHOLDERS = [...decisionTemplate("x").matchAll(/<[^<>\n]+>/g)].map((m) => m[0])
+
+/** Template slots still standing in `text`: a record carrying any of them was never written. */
+export function templatePlaceholders(text: string): string[] {
+  return PLACEHOLDERS.filter((p) => text.includes(p))
+}
+
+/** A record typed into the TUI's dialogs, for when there is no $EDITOR to fill the template
+ *  in: the same shape as `decisionTemplate`, with only the fields the user answered. */
+export function decisionRecord(input: { branchName: string; model?: string; outcome: string; why?: string; date?: Date }): string {
+  const why = (input.why ?? "").split(/[;\n]/).map((w) => w.trim()).filter(Boolean)
+  return `${recordHead(input.branchName, input.model, input.date ?? new Date())}
+**Outcome:** ${input.outcome.trim()}${why.length ? `\n**Why:**\n${why.map((w) => `- ${w}`).join("\n")}` : ""}
 `
 }
 

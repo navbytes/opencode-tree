@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { foldJournal, parseJournal, parseJournalLine, type JournalEntry } from "../src/core/journal.js"
+import { foldJournal, parseJournal, parseJournalLine, withBranchLabel, type JournalEntry } from "../src/core/journal.js"
 
 function line(entry: JournalEntry): string {
   return JSON.stringify(entry)
@@ -150,5 +150,25 @@ describe("foldJournal", () => {
     const contents = [line(fixture[0]!), "garbage", "", line(fixture[1]!)].join("\n")
     const entries = parseJournal(contents)
     expect(entries).toHaveLength(2)
+  })
+})
+
+describe("withBranchLabel", () => {
+  test("a second branch off one anchor is appended, not written over", () => {
+    // label.set replaces the label for a message, so `⎇ b` alone would drop `⎇ a`
+    const first = withBranchLabel(undefined, "a")
+    expect(first).toBe("⎇ a")
+    const both = withBranchLabel(first, "b")
+    expect(both).toBe("⎇ a, ⎇ b")
+    expect(withBranchLabel(both, "b")).toBe(both) // re-opening the same branch adds nothing
+    expect(withBranchLabel("checkpoint", "a")).toBe("checkpoint, ⎇ a") // a bookmark survives
+  })
+
+  test("the fold keeps the combined label under the anchor's messageID", () => {
+    const entries: JournalEntry[] = [
+      { v: 1, id: "l_1", ts: 1, type: "label.set", actor: "tui", data: { sessionID: "s_root", messageID: "m_10", label: withBranchLabel(undefined, "a") } },
+      { v: 1, id: "l_2", ts: 2, type: "label.set", actor: "tui", data: { sessionID: "s_root", messageID: "m_10", label: withBranchLabel("⎇ a", "b") } },
+    ]
+    expect(foldJournal(entries).labels["m_10"]?.label).toBe("⎇ a, ⎇ b")
   })
 })

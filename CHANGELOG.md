@@ -17,6 +17,8 @@ merge paths, result and turn crops, undo, resume) and 50/100/200-turn scale runs
   `/ctree status`; decision records carry the real model; two branches off one anchor keep both
   labels (`⎇ a, ⎇ b`); the merge title counts the branch's own turns; `m` on a trunk with no
   open branch says so.
+- Feedback inside `/tree` goes to a status-line notice: toasts raised from the route never
+  reached the screen, so crop, undo and copy confirmations were being lost.
 - Lanes follow the cursor on long sessions. The timeline is laid out in full and the strip shows a
   window of it: it opens at the newest events, stays put while the cursor moves inside it, and
   shifts in chunks of a third of the width when the cursor nears an edge, so the highlighted step

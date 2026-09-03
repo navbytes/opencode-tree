@@ -9,7 +9,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import type { Plugin } from "@opencode-ai/plugin"
-import { activeCrops } from "../core/journal.js"
+import { activeCrops, withBranchLabel } from "../core/journal.js"
 import { applyCrops, type CropSpec, type MinimalMessage } from "../core/crop.js"
 import { JournalStore, type StorageMode } from "../shared/store.js"
 import { CTREE_HELP, parseCtreeArgs } from "../core/ctree-args.js"
@@ -44,6 +44,14 @@ export const server: Plugin = async ({ worktree, client, directory }, options) =
     await client.session
       .update({ path: { id: sessionID }, query: { directory }, body: { metadata: { ...meta, ctree: { ...(meta.ctree ?? {}), ...ctree } } } as unknown as { title?: string } })
       .catch(() => undefined)
+  }
+
+  /** A branch's display name: an adopted native fork carries no journal `name`, so fall back
+   *  to the session's own title rather than printing a raw session id (DESIGN.md §4.1). */
+  async function branchLabel(sessionID: string, name?: string): Promise<string> {
+    if (name) return name
+    const res = await client.session.get({ path: { id: sessionID }, query: { directory } }).catch(() => undefined)
+    return (res?.data as { title?: string } | undefined)?.title || "branch"
   }
 
   /** One request, no paging: `before` is an opaque cursor the response never exposes, and
@@ -108,9 +116,8 @@ export const server: Plugin = async ({ worktree, client, directory }, options) =
             const crops = state.activeCrops(sessionID)
             const hidden = crops.reduce((s, c) => s + c.targets.reduce((x, y) => x + y.estTokens, 0), 0)
             const branches = Object.values(state.sessions).filter((b) => b.parentSessionID === sessionID)
-            // an adopted native fork carries no journal name: fall back to the session's own title
-            const title = me && !me.name ? ((await client.session.get({ path: { id: sessionID }, query: { directory } }).catch(() => undefined))?.data as { title?: string } | undefined)?.title : undefined
-            return say(output, [`opencode-context-tree ${PLUGIN_VERSION} · tree ${state.treeId}`, me ? `this session is ⎇ ${me.name ?? title ?? "branch"} (${me.status}) of ${me.parentSessionID}${me.note ? ` — ${me.note}` : ""}` : "this session is the trunk", `${branches.length} branch(es) from here: ${branches.map((b) => `${b.name ?? b.sessionID} [${b.status}]`).join(", ") || "none"}`, `${crops.length} active crop(s), ~${hidden} tokens hidden`, `${Object.values(state.decisions).filter((d) => d.sessionID === sessionID && !d.hidden).length} decision record(s) here`].join("\n"))
+            const listed = await Promise.all(branches.map(async (b) => `${await branchLabel(b.sessionID, b.name)} [${b.status}]`))
+            return say(output, [`opencode-context-tree ${PLUGIN_VERSION} · tree ${state.treeId}`, me ? `this session is ⎇ ${await branchLabel(sessionID, me.name)} (${me.status}) of ${me.parentSessionID}${me.note ? ` — ${me.note}` : ""}` : "this session is the trunk", `${branches.length} branch(es) from here: ${listed.join(", ") || "none"}`, `${crops.length} active crop(s), ~${hidden} tokens hidden`, `${Object.values(state.decisions).filter((d) => d.sessionID === sessionID && !d.hidden).length} decision record(s) here`].join("\n"))
           }
           case "branch": {
             const tr = await transcriptOf(sessionID)
@@ -122,7 +129,8 @@ export const server: Plugin = async ({ worktree, client, directory }, options) =
             if (!forkedID) return say(output, "fork failed.")
             store.registerSession(forkedID, treeId)
             store.record(treeId, "branch.opened", { sessionID: forkedID, parentSessionID: sessionID, anchorMessageID: last.id, name: cmd.name, kind: "explicit", branchModel: cmd.model }, "server")
-            store.record(treeId, "label.set", { sessionID, messageID: last.id, label: `⎇ ${cmd.name}` }, "server")
+            // a second branch off the same anchor must not replace the first one's label
+            store.record(treeId, "label.set", { sessionID, messageID: last.id, label: withBranchLabel(store.stateFor(treeId).labels[last.id]?.label, cmd.name) }, "server")
             await client.session.update({ path: { id: forkedID }, query: { directory }, body: { title: `⎇ ${cmd.name}` } }).catch(() => undefined)
             await mirrorMetadata(forkedID, { treeId, parentSessionID: sessionID, anchorMessageID: last.id, name: cmd.name, status: "open" })
             await mirrorMetadata(sessionID, { treeId })
@@ -136,7 +144,7 @@ export const server: Plugin = async ({ worktree, client, directory }, options) =
             store.record(state.treeId, "branch.closed", { sessionID, status: "rejected", note: cmd.note }, "server")
             await mirrorMetadata(sessionID, { status: "rejected" })
             await client.tui.publish({ query: { directory }, body: { type: "tui.session.select", properties: { sessionID: branch.parentSessionID } } as any }).catch(() => undefined)
-            return say(output, `⎇ ${branch.name ?? "branch"} discarded${cmd.note ? ` (${cmd.note})` : ""} — back on the trunk (${branch.parentSessionID}); /ctree undo from there re-opens it.`)
+            return say(output, `⎇ ${await branchLabel(sessionID, branch.name)} discarded${cmd.note ? ` (${cmd.note})` : ""} — back on the trunk (${branch.parentSessionID}); /ctree undo from there re-opens it.`)
           }
           case "crop-top":
           case "crop-auto": {
@@ -170,12 +178,12 @@ export const server: Plugin = async ({ worktree, client, directory }, options) =
             if (plan.kind === "abandon-branch") {
               store.record(state.treeId, "branch.closed", { sessionID: plan.sessionID, status: "abandoned" }, "server")
               await client.tui.publish({ query: { directory }, body: { type: "tui.session.select", properties: { sessionID: plan.parentSessionID } } as any }).catch(() => undefined)
-              return say(output, `left ⎇ ${plan.name ?? "branch"}; parent session is ${plan.parentSessionID}.`)
+              return say(output, `left ⎇ ${await branchLabel(plan.sessionID, plan.name)}; parent session is ${plan.parentSessionID}.`)
             }
             if (plan.kind === "reopen-branch") {
               const b = state.sessions[plan.sessionID]!
               store.record(state.treeId, "branch.opened", { sessionID: b.sessionID, parentSessionID: b.parentSessionID, anchorMessageID: b.anchorMessageID, name: b.name, kind: b.kind, branchModel: b.branchModel, trunkModel: b.trunkModel }, "server")
-              return say(output, `re-opened ⎇ ${b.name ?? "branch"} (${plan.sessionID}); its decision record is hidden from the model.`)
+              return say(output, `re-opened ⎇ ${await branchLabel(plan.sessionID, b.name)} (${plan.sessionID}); its decision record is hidden from the model.`)
             }
             return say(output, "nothing to undo on this path.")
           }

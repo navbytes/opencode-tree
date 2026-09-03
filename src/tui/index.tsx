@@ -8,7 +8,7 @@ import { Show, createEffect, createMemo, createSignal, on } from "solid-js"
 import { bandFor, contextSizeOf, formatContext, formatK, type MinimalMessage, type MinimalPart } from "../core/tokens.js"
 import { JournalStore, type StorageMode } from "../shared/store.js"
 import { debug } from "../shared/debug.js"
-import { BRANCH_DIALOG, MERGE_TRUST, TRUNK_LABEL, bumpJournal, clip, createNamedBranch, journalRevision, mergeBranch, mergeDialogOptions, mergeDialogTitle, mergeTargetOf, ownTurnCount, setLabel, type MergeMode } from "./actions.js"
+import { BRANCH_DIALOG, MERGE_TRUST, branchLabel, bumpJournal, clip, createNamedBranch, journalRevision, mergeBranch, mergeDialogOptions, mergeDialogTitle, mergePickerFigures, setLabel, type MergeMode } from "./actions.js"
 import { openSiblings } from "../core/decision.js"
 import { hasEditor } from "./editor.js"
 import { TreeRoute } from "./route.js"
@@ -57,13 +57,6 @@ function toMinimalMessages(messages: readonly any[], part: (messageID: string) =
       }),
     ),
   }))
-}
-
-/** A branch's display name: adopted native forks carry no journal `name`, so fall back to
- *  the session's own title (DESIGN.md §4.1's `kind: "native"`). */
-function branchLabel(api: TuiPluginApi, sessionID: string, name: string | undefined, max?: number): string {
-  const label = name ?? api.state.session.get(sessionID)?.title ?? "branch"
-  return max === undefined ? label : clip(label, max)
 }
 
 /** OpenCode's sidebar is narrow; anything longer wraps and orphans the tail of the line. */
@@ -228,15 +221,12 @@ const tui: TuiPlugin = async (api, rawOptions) => {
             api.ui.toast({ message: "not on an open branch — /branch first" })
             return
           }
-          // the parent is usually not the loaded session, so its turn/token figures come over the SDK
-          const parent = await fetchTranscript(api, branch.parentSessionID, directory).catch(() => undefined)
-          const parentLabel = branch.parentSessionID === state.root ? TRUNK_LABEL : (state.sessions[branch.parentSessionID]?.name ?? TRUNK_LABEL)
-          const turns = ownTurnCount(api.state.session.messages(sessionID), { messageID: branch.anchorMessageID, parentMessageIDs: parent?.messages.map((m) => m.id) ?? [] })
+          const { turns, target } = await mergePickerFigures({ api, store, directory }, state, sessionID)
           const mode = await new Promise<MergeMode | undefined>((resolve) => {
             api.ui.dialog.replace(
               () =>
                 api.ui.DialogSelect<MergeMode>({
-                  title: mergeDialogTitle(branch.name ?? "branch", parent ? mergeTargetOf(parentLabel, parent.messages) : undefined),
+                  title: mergeDialogTitle(branchLabel(api, sessionID, branch.name), target, turns),
                   options: mergeDialogOptions({ siblings: openSiblings(state, sessionID).length, turns }),
                   onSelect: (o) => {
                     resolve(o.value)

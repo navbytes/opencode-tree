@@ -35,6 +35,19 @@ export function liveTranscript(api: TuiPluginApi, sessionID: string): Transcript
   }
 }
 
+/** `api.state` only holds OpenCode's most recent page of messages (it lazy-loads older ones as
+ *  the session view scrolls), so a long session's outline would stop at that window. The SDK copy
+ *  is the whole history and gives the order; the live store wins wherever it has the message, so
+ *  streaming updates still land, and messages it has that the fetch missed are appended. */
+export function mergeTranscripts(full: Transcript | undefined, live: Transcript): Transcript {
+  if (!full || full.messages.length <= live.messages.length) return live
+  const byId = new Map(live.messages.map((m) => [m.id, m]))
+  const messages = full.messages.map((m) => byId.get(m.id) ?? m)
+  const known = new Set(full.messages.map((m) => m.id))
+  for (const m of live.messages) if (!known.has(m.id)) messages.push(m)
+  return { ...live, messages }
+}
+
 /** One-shot transcript of any session through the SDK. `limit` returns the *last* N and the
  *  `before` cursor is opaque (raw ids are rejected), so the whole session is fetched at once. */
 export async function fetchTranscript(api: TuiPluginApi, sessionID: string, directory: string): Promise<Transcript> {

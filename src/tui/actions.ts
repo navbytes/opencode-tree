@@ -8,11 +8,11 @@ import { createSignal } from "solid-js"
 import fs from "node:fs"
 import path from "node:path"
 import type { JournalStore } from "../shared/store.js"
-import type { CropAppliedData, JournalEntry } from "../core/journal.js"
+import { withBranchLabel, type CropAppliedData, type JournalEntry, type TreeState } from "../core/journal.js"
 import type { UndoPlan } from "../core/undo.js"
 import type { TranscriptMessage } from "../core/transcript.js"
 import { contextSizeOf, formatK, type MinimalMessage } from "../core/tokens.js"
-import { DECISION_SYSTEM, branchTranscriptText, buildDecisionDraftPrompt, decisionMessageText, decisionTemplate, openSiblings } from "../core/decision.js"
+import { DECISION_SYSTEM, branchTranscriptText, buildDecisionDraftPrompt, decisionMessageText, decisionRecord, decisionTemplate, openSiblings, templatePlaceholders } from "../core/decision.js"
 import { editInExternalEditor, hasEditor } from "./editor.js"
 import { debug } from "../shared/debug.js"
 import { fetchTranscript } from "./transcripts.js"
@@ -92,6 +92,23 @@ export function navigateToSession(ctx: ActionContext, sessionID: string): void {
   ctx.api.route.navigate("session", { sessionID })
 }
 
+/** A branch's display name: adopted native forks carry no journal `name`, so fall back to
+ *  the session's own title (DESIGN.md §4.1's `kind: "native"`). */
+export function branchLabel(api: TuiPluginApi, sessionID: string, name: string | undefined, max?: number): string {
+  const label = name ?? api.state.session.get(sessionID)?.title ?? "branch"
+  return max === undefined ? label : clip(label, max)
+}
+
+/** `provider/model` of the last reply in a transcript — OpenCode stamps every assistant
+ *  message with the model that answered, which is the session's current model. */
+export function lastAnsweringModel(messages: readonly { role?: string; providerID?: string; modelID?: string }[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!
+    if (m.role === "assistant" && m.providerID && m.modelID) return `${m.providerID}/${m.modelID}`
+  }
+  return undefined
+}
+
 /** Abort a streaming session before we leave it (DESIGN.md §9, Pi #7022). */
 async function abortIfBusy(ctx: ActionContext, sessionID: string): Promise<boolean> {
   const status = ctx.api.state.session.status(sessionID)
@@ -146,7 +163,7 @@ export async function createNamedBranch(
   ctx.store.registerSession(forkedID, treeId)
   record(ctx, treeId, "branch.opened", { sessionID: forkedID, parentSessionID: input.sessionID, anchorMessageID: last.id, name: input.name, kind: "explicit", branchModel: input.model, trunkModel: input.trunkModel })
   debug("branch.recorded")
-  record(ctx, treeId, "label.set", { sessionID: input.sessionID, messageID: last.id, label: `⎇ ${input.name}` })
+  record(ctx, treeId, "label.set", { sessionID: input.sessionID, messageID: last.id, label: withBranchLabel(ctx.store.stateFor(treeId).labels[last.id]?.label, input.name) })
   await ctx.api.client.session.update({ sessionID: forkedID, directory: ctx.directory, title: `⎇ ${input.name}` }).catch(() => undefined)
   await mirrorMetadata(ctx, forkedID, { treeId, parentSessionID: input.sessionID, anchorMessageID: last.id, name: input.name, status: "open" })
   await mirrorMetadata(ctx, input.sessionID, { treeId })
@@ -290,7 +307,7 @@ export async function executeUndo(ctx: ActionContext, sessionID: string, plan: U
       record(ctx, treeId, "branch.closed", { sessionID: plan.sessionID, status: "abandoned" })
       await mirrorMetadata(ctx, plan.sessionID, { status: "abandoned" })
       navigateToSession(ctx, plan.parentSessionID)
-      ctx.api.ui.toast({ variant: "success", message: `↶ back on the trunk; ⎇ ${plan.name ?? "branch"} kept as abandoned` })
+      ctx.api.ui.toast({ variant: "success", message: `↶ back on the trunk; ⎇ ${branchLabel(ctx.api, plan.sessionID, plan.name)} kept as abandoned` })
       return plan.parentSessionID
     }
     case "reopen-branch": {
@@ -299,7 +316,7 @@ export async function executeUndo(ctx: ActionContext, sessionID: string, plan: U
       record(ctx, treeId, "branch.opened", { sessionID: branch.sessionID, parentSessionID: branch.parentSessionID, anchorMessageID: branch.anchorMessageID, name: branch.name, kind: branch.kind, branchModel: branch.branchModel, trunkModel: branch.trunkModel })
       await mirrorMetadata(ctx, plan.sessionID, { status: "open" })
       navigateToSession(ctx, plan.sessionID)
-      ctx.api.ui.toast({ variant: "success", message: `↶ re-opened ⎇ ${branch.name ?? "branch"}${plan.decisionMessageID ? " (its decision record is hidden from the model)" : ""}` })
+      ctx.api.ui.toast({ variant: "success", message: `↶ re-opened ⎇ ${branchLabel(ctx.api, plan.sessionID, branch.name)}${plan.decisionMessageID ? " (its decision record is hidden from the model)" : ""}` })
       return plan.sessionID
     }
   }
@@ -345,10 +362,28 @@ export type MergeTarget = { label: string; turns: number; tokens: number }
 export const TRUNK_LABEL = "trunk"
 
 /** The picker's destination figures, computed the same way on every surface (the gauge's own
- *  context size and the user-turn count) so the numbers on one screen agree. */
-export function mergeTargetOf(label: string, messages: readonly TranscriptMessage[]): MergeTarget {
+ *  context size and the user-turn count) so the numbers on one screen agree. `anchor` counts
+ *  the destination's *own* turns, like its tree row — a nested parent's inherited prefix is
+ *  not its work; the trunk has no anchor and counts all of them. */
+export function mergeTargetOf(label: string, messages: readonly TranscriptMessage[], anchor?: { messageID?: string; parentMessageIDs: readonly string[] }): MergeTarget {
   const minimal = messages.map((m): MinimalMessage => ({ info: m.role === "assistant" ? { role: "assistant", tokens: m.tokens } : { role: "user" }, parts: m.parts }))
-  return { label, turns: messages.filter((m) => m.role === "user").length, tokens: contextSizeOf(minimal).tokens }
+  const turns = anchor ? ownTurnCount(messages, anchor) : messages.filter((m) => m.role === "user").length
+  return { label, turns, tokens: contextSizeOf(minimal).tokens }
+}
+
+/** Everything the merge picker's header needs, counted past each session's own anchor so the
+ *  figures match the tree's rows: what the branch would fold, and where it lands. */
+export async function mergePickerFigures(ctx: ActionContext, state: TreeState, sessionID: string): Promise<{ turns: number; target?: MergeTarget }> {
+  const branch = state.sessions[sessionID]
+  if (!branch) return { turns: 0 }
+  // the parent is usually not the loaded session, so its figures come over the SDK
+  const parent = await fetchTranscript(ctx.api, branch.parentSessionID, ctx.directory).catch(() => undefined)
+  const turns = ownTurnCount(ctx.api.state.session.messages(sessionID), { messageID: branch.anchorMessageID, parentMessageIDs: parent?.messages.map((m) => m.id) ?? [] })
+  if (!parent) return { turns }
+  const up = state.sessions[branch.parentSessionID]
+  const grand = up ? await fetchTranscript(ctx.api, up.parentSessionID, ctx.directory).catch(() => undefined) : undefined
+  const anchor = up ? { messageID: up.anchorMessageID, parentMessageIDs: grand?.messages.map((m) => m.id) ?? [] } : undefined
+  return { turns, target: mergeTargetOf(up ? branchLabel(ctx.api, up.sessionID, up.name) : TRUNK_LABEL, parent.messages, anchor) }
 }
 
 /** The branch's *own* user turns — the ones a squash folds into the record. Sliced like
@@ -362,11 +397,13 @@ export function ownTurnCount(messages: readonly { role: string }[], anchor: { me
 /** Shared copy for the merge picker (palette and route). Naming the destination "trunk" rather
  *  than quoting the parent's title keeps the title from reading as a question ("→ What does git
  *  rebase do?"). */
-export function mergeDialogTitle(branchName: string, target?: MergeTarget | string): string {
+export function mergeDialogTitle(branchName: string, target?: MergeTarget | string, ownTurns?: number): string {
+  // both counts are "own turns past the anchor", so neither can be read as the other's
+  const from = `Merge ⎇ ${branchName}${ownTurns === undefined ? "" : ` (${plural(ownTurns, "turn")})`}`
   // a bare parent title is the old call shape, and quoting it is the bug: name the trunk instead
-  if (!target || typeof target === "string") return `Merge ⎇ ${branchName} → the trunk`
+  if (!target || typeof target === "string") return `${from} → the trunk`
   const where = target.label === TRUNK_LABEL ? TRUNK_LABEL : `⎇ ${clip(target.label, 24)}`
-  return `Merge ⎇ ${branchName} → ${where} (${plural(target.turns, "turn")}, ~${formatK(target.tokens)})`
+  return `${from} → ${where} (${plural(target.turns, "turn")}, ~${formatK(target.tokens)})`
 }
 
 /** Tournament only exists when there is something to compare against. Descriptions render on
@@ -441,7 +478,7 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
   const branch = state.sessions[input.sessionID]
   if (!branch || branch.status !== "open") throw new Error("this session is not an open branch")
   const parentID = branch.parentSessionID
-  const name = branch.name ?? "branch"
+  const name = branchLabel(ctx.api, input.sessionID, branch.name)
   debug("merge.start", { mode: input.mode, sessionID: input.sessionID, parentID })
   await abortIfBusy(ctx, input.sessionID)
 
@@ -478,19 +515,32 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
 
   // --- draft ---------------------------------------------------------------
   const transcript = branchTranscriptText(own, { messageID: branch.anchorMessageID, parentMessageIDs })
-  const model = branch.branchModel ?? branch.trunkModel
+  // no journal model (an adopted fork, or /branch without one) still knows what answered here
+  const model = branch.branchModel ?? branch.trunkModel ?? own.model
   const modelRef = model ? { providerID: model.split("/")[0]!, modelID: model.split("/").slice(1).join("/") } : undefined
   const siblingIDs = input.mode === "tournament" ? openSiblings(state, input.sessionID) : []
   const siblings = await Promise.all(
     siblingIDs.map(async (id) => {
       const tr = await fetchOwnTranscript(ctx, id)
       const b = state.sessions[id]!
-      return { name: b.name ?? id, transcript: branchTranscriptText(tr, { messageID: b.anchorMessageID, parentMessageIDs }, 800) }
+      return { name: branchLabel(ctx.api, id, b.name), transcript: branchTranscriptText(tr, { messageID: b.anchorMessageID, parentMessageIDs }, 800) }
     }),
   )
   let draft: string
+  // a record the user typed field by field needs no second gate: the dialogs were it
+  let typed = false
   if (input.mode === "squash-no-llm") {
-    draft = decisionTemplate(name, model)
+    // with no $EDITOR the gate has nowhere to type, so the fields are asked one dialog at a time
+    if (hasEditor()) draft = decisionTemplate(name, model)
+    else {
+      const written = await promptDecisionRecord(ctx, name, model)
+      if (!written) {
+        ctx.api.ui.toast({ variant: "warning", message: "merge aborted — nothing written" })
+        return undefined
+      }
+      draft = written
+      typed = true
+    }
   } else {
     ctx.api.ui.toast({ message: `drafting the decision record for ⎇ ${name}…` })
     draft = await draftWithHelper(ctx, { title: `Context tree: draft for ${name}`, system: DECISION_SYSTEM, prompt: buildDecisionDraftPrompt({ branchName: name, model, transcript, siblings }), model: modelRef })
@@ -498,11 +548,17 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
   debug("merge.drafted", { chars: draft.length })
 
   // --- gate ----------------------------------------------------------------
-  const confirm = input.confirm ?? ((d: string) => editInExternalEditor(ctx.api.renderer as any, d, ctx.directory, MERGE_GATE_NOTICE))
-  if (!input.confirm && !hasEditor()) throw new Error("no $EDITOR configured — set VISUAL/EDITOR, or use the in-app confirm")
+  const confirm = input.confirm ?? (typed ? async (d: string) => d : (d: string) => editInExternalEditor(ctx.api.renderer as any, d, ctx.directory, MERGE_GATE_NOTICE))
+  if (!input.confirm && !typed && !hasEditor()) throw new Error("no $EDITOR configured — set VISUAL/EDITOR, or use the in-app confirm")
   const confirmed = await confirm(draft)
   if (!confirmed) {
     ctx.api.ui.toast({ variant: "warning", message: "merge aborted — nothing written" })
+    return undefined
+  }
+  // an unfilled template is not a record: landing it would cost the trunk ~130 tokens of
+  // "<1–3 sentences: …>" and nothing else, so the branch stays open instead
+  if (templatePlaceholders(confirmed).length > 0) {
+    ctx.api.ui.toast({ variant: "warning", message: "record not written: fill in the template" })
     return undefined
   }
 
@@ -527,16 +583,27 @@ export async function mergeBranch(ctx: ActionContext, input: MergeInput): Promis
   return parentID
 }
 
+/** The record's fields, asked one dialog at a time — the fallback for a merge with no $EDITOR.
+ *  Escape (or an empty outcome) aborts: a record nobody wrote is worse than no record. */
+async function promptDecisionRecord(ctx: ActionContext, branchName: string, model?: string): Promise<string | undefined> {
+  const outcome = await promptDialog(ctx, `◆ ${branchName} — outcome: what was concluded or built?`, "1–3 sentences")
+  if (!outcome?.trim()) return undefined
+  const why = await promptDialog(ctx, "Why? (optional, separate reasons with ';')", "the working set fits in memory")
+  if (why === undefined) return undefined
+  return decisionRecord({ branchName, model, outcome, why })
+}
+
 async function fetchOwnTranscript(ctx: ActionContext, sessionID: string) {
   const res = await ctx.api.client.session.messages({ sessionID, directory: ctx.directory })
-  const messages = ((res.data as any[]) ?? []).map((m) => ({
+  const raw = (res.data as any[]) ?? []
+  const messages = raw.map((m) => ({
     id: m.info.id as string,
     role: (m.info.role === "user" ? "user" : "assistant") as "user" | "assistant",
     time: m.info.time,
     tokens: m.info.tokens,
     parts: (m.parts as any[]).map((p) => ({ id: p.id, type: p.type, text: p.text, tool: p.tool, callID: p.callID, state: p.state, time: p.time, metadata: p.metadata })),
   }))
-  return { sessionID, title: sessionID, status: "available" as const, messages }
+  return { sessionID, title: sessionID, status: "available" as const, messages, model: lastAnsweringModel(raw.map((m) => m.info)) }
 }
 
 /** Shared copy for the branch-name dialog (palette and route). */
