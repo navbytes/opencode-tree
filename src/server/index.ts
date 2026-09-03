@@ -86,7 +86,7 @@ export const server: Plugin = async ({ worktree, client, directory }, options) =
     config: async (cfg) => {
       const c = cfg as { command?: Record<string, unknown> }
       if (c.command?.["ctree"]) return // a user-defined /ctree command wins
-      c.command = { ...(c.command ?? {}), ctree: { template: "$ARGUMENTS", description: "Context tree (headless): status | branch <name> | merge --discard | crop --top | crop --auto | undo | decisions" } }
+      c.command = { ...(c.command ?? {}), ctree: { template: "$ARGUMENTS", description: "Context tree (headless): status | branch | merge --discard | crop | undo | decisions — for the /tree UI, list the plugin in tui.json too" } }
     },
 
     "command.execute.before": async (input, output) => {
