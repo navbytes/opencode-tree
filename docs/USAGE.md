@@ -2,6 +2,15 @@
 
 ## Install
 
+The short way — OpenCode registers both halves for you:
+
+```sh
+opencode plugin opencode-context-tree -g     # global; drop -g for the current project
+```
+
+By hand, the package name must be listed in **both** files (the TUI half is read from
+`tui.json` only; listing it just in `opencode.json` gives you `/ctree` but no `/tree`):
+
 ```jsonc
 // opencode.json (server half: crops, branch model, headless /ctree commands)
 { "plugin": [["opencode-context-tree", { "storage": "local" }]] }

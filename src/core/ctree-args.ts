@@ -87,5 +87,5 @@ export const CTREE_HELP = `context tree — headless commands
   /ctree undo                         revert the last crop / branch / merge on this path
   /ctree decisions [--export [path]]  list ◆ decision records (default export: ./ctree-decisions.md)
 The TUI has the full experience: /tree (ctrl+q), /branch, /merge, /decisions.
-Not seeing /tree? The UI half loads only from tui.json (global ~/.config/opencode/tui.json or
-the project's .opencode/tui.json): add  "plugin": ["opencode-context-tree"]  there as well.`
+Not seeing /tree? The UI half is loaded from tui.json, not opencode.json. Let OpenCode write
+both files:  opencode plugin opencode-context-tree -g   (drop -g for this project only).`

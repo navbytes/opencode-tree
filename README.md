@@ -76,6 +76,20 @@ the tree stays visible and folded — you always see the whole tree:
 
 ![sidebar card](docs/screenshots/sidebar-card.png)
 
+## Install
+
+One command; OpenCode reads the package manifest and registers both halves (the server plugin in
+`opencode.json`, the TUI plugin in `tui.json`):
+
+```sh
+opencode plugin opencode-context-tree -g     # everywhere (~/.config/opencode)
+opencode plugin opencode-context-tree        # this project only (.opencode/)
+```
+
+Restart OpenCode; `/tree` (or `ctrl+q`) opens the tree. If you only see `/ctree`, the TUI half
+was not registered — the command above fixes that. Adding the name by hand works too, but it must
+go in **both** files.
+
 ## Try it from source
 
 ```sh
@@ -112,11 +126,3 @@ double for protected, `a` auto, `t` result⇄turn, `⏎` apply), `i` inspector, 
 - the UI is a TUI plugin (`@opencode-ai/plugin/tui`): a route, two slots (gauge,
   sidebar card), dialogs and a keymap layer.
 
-Two config entries will be needed once it ships:
-
-```jsonc
-// opencode.json
-{ "plugin": ["opencode-context-tree"] }
-// tui.json
-{ "plugin": ["opencode-context-tree"] }
-```
