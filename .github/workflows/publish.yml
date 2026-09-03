@@ -35,14 +35,12 @@ jobs:
       - run: bun run typecheck
       - run: bun test
 
-      - name: Release tag must match package.json version
+      # The tag is the version: stamp it into package.json in this checkout only.
+      - name: Version from the release tag
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          pkg="$(node -p "require('./package.json').version")"
-          if [ "$tag" != "$pkg" ]; then
-            echo "release tag v$tag does not match package.json version $pkg" >&2
-            exit 1
-          fi
+          echo "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$' || { echo "ref '$GITHUB_REF_NAME' is not a version tag" >&2; exit 1; }
+          npm version "$tag" --no-git-tag-version --allow-same-version
 
       # OIDC trusted publishing needs the package to already exist on npm: the very first
       # version of a new package is published once by hand, every later one lands here.

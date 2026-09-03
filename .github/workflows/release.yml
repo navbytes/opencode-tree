@@ -1,13 +1,15 @@
 name: Release
 
-# One click from the Actions tab: bump the version, commit + tag on main, create the GitHub
-# Release, then dispatch the publish workflow on the new tag (OIDC trusted publishing).
-# The dispatch is explicit because releases created with GITHUB_TOKEN do not trigger workflows.
+# One click from the Actions tab. The tag is the source of truth for the version: this
+# workflow tags the current main, creates the GitHub Release, and dispatches the publish
+# workflow on that tag, which stamps package.json from the tag before `npm publish`.
+# Nothing is pushed to main, so the branch ruleset needs no bypass and no token exists.
+# (Releases created with GITHUB_TOKEN do not trigger other workflows; the dispatch is explicit.)
 on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "Version bump"
+        description: "Version bump relative to the latest v* tag"
         type: choice
         default: patch
         options: [patch, minor, major]
@@ -16,12 +18,12 @@ on:
         type: string
         default: ""
       dry_run:
-        description: "Do everything except push, release and publish"
+        description: "Compute and show the version; do not tag, release or publish"
         type: boolean
         default: false
 
 permissions:
-  contents: write   # push the bump commit + tag, create the release
+  contents: write   # push the tag, create the release
   actions: write    # dispatch publish.yml
 
 concurrency: release
@@ -42,45 +44,47 @@ jobs:
       - run: bun run typecheck
       - run: bun test
 
-      - name: Bump version, tag, keep the changelog in step
-        id: bump
+      - name: Decide the version
+        id: v
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          target="${{ inputs.version }}"
-          [ -n "$target" ] || target="${{ inputs.bump }}"
-          version="$(npm version "$target" --no-git-tag-version)"   # prints vX.Y.Z
-          version="${version#v}"
-          if ! grep -q "^## ${version}" CHANGELOG.md; then
-            # a placeholder heading so the changelog never lags behind the tags; edit it after
-            { printf '## %s — %s\n\nSee the GitHub release notes.\n\n' "$version" "$(date -u +%F)"; cat CHANGELOG.md; } > CHANGELOG.tmp
-            # keep the top-level title first if the file starts with one
-            if head -1 CHANGELOG.md | grep -q '^# '; then
-              { head -1 CHANGELOG.md; echo; printf '## %s — %s\n\nSee the GitHub release notes.\n\n' "$version" "$(date -u +%F)"; tail -n +3 CHANGELOG.md; } > CHANGELOG.tmp
-            fi
-            mv CHANGELOG.tmp CHANGELOG.md
+          latest="$(git tag --list 'v*' --sort=-v:refname | head -1)"
+          latest="${latest#v}"; latest="${latest:-0.0.0}"
+          explicit="${{ inputs.version }}"
+          if [ -n "$explicit" ]; then
+            next="${explicit#v}"
+          else
+            IFS=. read -r major minor patch <<< "$latest"
+            case "${{ inputs.bump }}" in
+              major) next="$((major+1)).0.0" ;;
+              minor) next="$major.$((minor+1)).0" ;;
+              *)     next="$major.$minor.$((patch+1))" ;;
+            esac
           fi
-          git add package.json CHANGELOG.md
-          git commit -m "$version"
-          git tag -a "v$version" -m "v$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Prepared v$version:"; git log --oneline -1
+          echo "$next" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$' || { echo "not a semver version: $next" >&2; exit 1; }
+          git rev-parse -q --verify "refs/tags/v$next" >/dev/null && { echo "tag v$next already exists" >&2; exit 1; }
+          if ! grep -q "^## ${next}" CHANGELOG.md; then
+            echo "::warning::CHANGELOG.md has no '## $next' section — add one on main before or after the release"
+          fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "Latest tag v$latest → releasing v$next from $(git rev-parse --short HEAD)"
 
-      - name: Push, release, and publish
+      - name: Tag, release, publish
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          v="${{ steps.bump.outputs.version }}"
-          git push origin main "v$v"
+          v="${{ steps.v.outputs.next }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$v" -m "v$v"
+          git push origin "v$v"
           gh release create "v$v" --title "v$v" --generate-notes
           gh workflow run publish.yml --ref "v$v"
           echo "Released v$v; publish workflow dispatched on the tag."
 
-      - name: Dry run summary
+      - name: Dry run
         if: ${{ inputs.dry_run }}
-        run: |
-          echo "Dry run: would push main + tag v${{ steps.bump.outputs.version }}, create the release, and dispatch publish.yml."
-          git show --stat HEAD | head -12
+        run: echo "Dry run — would tag v${{ steps.v.outputs.next }} (latest v${{ steps.v.outputs.latest }}), create the release, and dispatch publish.yml."

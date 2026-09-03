@@ -1,6 +1,6 @@
 {
   "name": "opencode-context-tree",
-  "version": "0.1.1",
+  "version": "0.0.0-dev",
   "private": false,
   "type": "module",
   "description": "Pi-style context tree for OpenCode: branch, merge (human-confirmed decision records), crop, undo, plus a DeepSeek-Harness-style trajectory view",

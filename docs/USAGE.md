@@ -165,9 +165,12 @@ a model (`provider/model`): `/ctree branch fix flaky test` names the branch "fix
 
 ## Releasing (maintainers)
 
-GitHub → Actions → **Release** → *Run workflow*: pick `patch` / `minor` / `major` (or type an
-exact version), leave *dry run* off. The workflow runs typecheck and tests, bumps
-`package.json`, adds a changelog heading if the version has none, commits and tags `vX.Y.Z`
-on `main`, creates the GitHub Release with generated notes, and dispatches the publish
-workflow on that tag, which publishes to npm through trusted publishing (OIDC, no token).
-Tick *dry run* to see the bump without pushing anything.
+GitHub → Actions → **Release** → *Run workflow*: pick `patch` / `minor` / `major` (relative to
+the latest `v*` tag) or type an exact version. The workflow runs typecheck and tests, tags the
+current `main` as `vX.Y.Z`, creates the GitHub Release with generated notes, and dispatches the
+publish workflow on that tag, which publishes to npm through trusted publishing (OIDC, no token).
+Tick *dry run* to see the version it would cut without doing anything.
+
+The tag is the version: `package.json` on `main` says `0.0.0-dev` and is stamped from the tag at
+publish time, so no commit ever has to land on the protected branch. Keep `CHANGELOG.md` by hand
+(the workflow warns when the section for the new version is missing).
