@@ -15,6 +15,32 @@ Branch, jump, labels, filters, search, crop + undo, squash/discard/tournament me
 trajectory), the end-user flows, the combined tree + trajectory mockup, the data
 model, architecture, edge cases, and the roadmap.
 
+## Install
+
+Requires OpenCode 1.18 or newer. One command registers both halves of the plugin (the server
+plugin in `opencode.json`, the TUI plugin in `tui.json`):
+
+```sh
+opencode plugin opencode-context-tree -g     # for every project (~/.config/opencode)
+opencode plugin opencode-context-tree        # for the current project only (.opencode/)
+```
+
+Restart OpenCode. `/tree` (or `ctrl+q`) opens the tree; `/branch`, `/merge`, `/decisions` and the
+headless `/ctree` commands are available too.
+
+If you only see `/ctree` and no `/tree`, the TUI half is not registered: run the command above.
+To register by hand instead, the package name must be listed in **both** files:
+
+```jsonc
+// opencode.json (or ~/.config/opencode/opencode.jsonc)
+{ "plugin": ["opencode-context-tree"] }
+// tui.json     (or ~/.config/opencode/tui.json)
+{ "plugin": ["opencode-context-tree"] }
+```
+
+Options go in either file: `[["opencode-context-tree", { "storage": "global", "jumpSummary": "never" }]]`
+(see [docs/USAGE.md](docs/USAGE.md)). To hack on it from a checkout, see "Try it from source" below.
+
 ## The idea in one screen
 
 `/tree` is an outline of the whole session tree — Pi's tree — where every message and tool step
@@ -75,20 +101,6 @@ the tree stays visible and folded — you always see the whole tree:
 | ![help](docs/screenshots/help.png) | ![merge picker](docs/screenshots/merge-picker.png) |
 
 ![sidebar card](docs/screenshots/sidebar-card.png)
-
-## Install
-
-One command; OpenCode reads the package manifest and registers both halves (the server plugin in
-`opencode.json`, the TUI plugin in `tui.json`):
-
-```sh
-opencode plugin opencode-context-tree -g     # everywhere (~/.config/opencode)
-opencode plugin opencode-context-tree        # this project only (.opencode/)
-```
-
-Restart OpenCode; `/tree` (or `ctrl+q`) opens the tree. If you only see `/ctree`, the TUI half
-was not registered — the command above fixes that. Adding the name by hand works too, but it must
-go in **both** files.
 
 ## Try it from source
 
