@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 — 2026-09-03
+
+- Install with OpenCode's own `opencode plugin opencode-context-tree [-g]`, which registers
+  both halves (server entry in `opencode.json`, TUI entry in `tui.json`); README and USAGE
+  lead with it.
+- If only the server half is installed (you see `/ctree` but no `/tree`), the `/ctree` help
+  and its palette description now say exactly that and point at the command above.
+- Published through npm trusted publishing (OIDC, no token) from the GitHub Release.
+
 ## 0.1.0 — 2026-09-03
 
 First working version, built against OpenCode 1.18.26.
