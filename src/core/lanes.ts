@@ -250,17 +250,6 @@ function gapBefore(events: LaneEvent[], i: number, mode: LaneMode): number {
   return mode === "turns" && events[i]!.turn !== events[i - 1]!.turn ? 2 : 1
 }
 
-/** Index of the oldest event that still fits at one cell each — everything before it is dropped. */
-function firstFitting(events: LaneEvent[], mode: LaneMode, width: number): number {
-  let cells = 0
-  for (let i = events.length - 1; i >= 0; i--) {
-    const next = cells === 0 ? 1 : cells + 1 + gapBefore(events, i + 1, mode)
-    if (next > width) return i + 1
-    cells = next
-  }
-  return 0
-}
-
 function durationWidths(events: LaneEvent[], budget: number): number[] {
   const total = events.reduce((s, e) => s + Math.max(0, e.durationMs ?? 0), 0)
   if (total <= 0) return events.map(() => 1) // no timing data: read as the calls layout
@@ -276,32 +265,104 @@ function durationWidths(events: LaneEvent[], budget: number): number[] {
   return widths
 }
 
-export function buildEventStrip(transcript: Transcript, mode: LaneMode, width: number): EventStrip {
-  const w = Math.max(0, Math.floor(width))
-  const all = eventsOf(transcript)
-  const truncatedLeft = firstFitting(all, mode, w)
-  const events = all.slice(truncatedLeft)
-  const gaps = events.map((_, i) => (i === 0 ? 0 : gapBefore(events, i, mode)))
-  const widths = mode === "duration" ? durationWidths(events, w - gaps.reduce((s, g) => s + g, 0)) : events.map(() => 1)
+/** Duration mode has no width to divide, so the axis gets a fixed density: enough cells per event
+ *  that a call an order of magnitude longer than its neighbours still draws that much wider. */
+const DURATION_CELLS = 4
 
-  const blank = (): (StripCell | null)[] => Array.from({ length: w }, () => null)
-  const lanes: EventStrip["lanes"] = { input: blank(), model: blank(), tools: blank() }
-  const empty: EventStrip["empty"] = { input: true, model: true, tools: true }
-  const spans: { start: number; end: number }[] = []
-  let cursor = 0
-  events.forEach((e, i) => {
-    const start = cursor + (gaps[i] ?? 0)
-    const end = Math.min(w, start + (widths[i] ?? 1))
-    for (let c = start; c < end; c++) lanes[e.lane][c] = { lane: e.lane, eventIndex: i, glyph: EVENT_GLYPH, ...(e.error ? { error: true } : {}) }
-    spans.push({ start, end })
-    empty[e.lane] = false
-    cursor = start + (widths[i] ?? 1)
-  })
-  return { events, width: w, lanes, spans, empty, truncatedLeft }
+export type EventLayout = {
+  /** every event of the transcript, in time order */
+  events: LaneEvent[]
+  /** cell range [start, end) of `events[i]` on the unbounded axis */
+  spans: { start: number; end: number }[]
+  totalWidth: number
+  /** `totalWidth` cells each; null = gap/empty */
+  lanes: Record<LaneEvent["lane"], (StripCell | null)[]>
+  empty: Record<LaneEvent["lane"], boolean>
 }
 
-/** Index into `strip.events` of the event a message/part belongs to (-1 if it is not on the strip). */
-export function stripIndexFor(strip: EventStrip, messageID: string, partID?: string): number {
+/** The whole timeline on one axis, however wide it comes out — `windowFor` picks the slice to draw. */
+export function layoutEventStrip(transcript: Transcript, mode: LaneMode): EventLayout {
+  const events = eventsOf(transcript)
+  const widths = mode === "duration" ? durationWidths(events, events.length * DURATION_CELLS) : events.map(() => 1)
+  const spans: { start: number; end: number }[] = []
+  let cursor = 0
+  events.forEach((_, i) => {
+    const start = cursor + (i === 0 ? 0 : gapBefore(events, i, mode))
+    cursor = start + (widths[i] ?? 1)
+    spans.push({ start, end: cursor })
+  })
+  const blank = (): (StripCell | null)[] => Array.from({ length: cursor }, () => null)
+  const lanes: EventLayout["lanes"] = { input: blank(), model: blank(), tools: blank() }
+  events.forEach((e, i) => {
+    const cell: StripCell = { lane: e.lane, eventIndex: i, glyph: EVENT_GLYPH, ...(e.error ? { error: true } : {}) }
+    for (let c = spans[i]!.start; c < spans[i]!.end; c++) lanes[e.lane][c] = cell
+  })
+  const has = (lane: LaneEvent["lane"]) => !events.some((e) => e.lane === lane)
+  return { events, spans, totalWidth: cursor, lanes, empty: { input: has("input"), model: has("model"), tools: has("tools") } }
+}
+
+/** The layout windowed at its end: the newest events, as many as `width` holds. */
+export function buildEventStrip(transcript: Transcript, mode: LaneMode, width: number): EventStrip {
+  const w = Math.max(0, Math.floor(width))
+  const layout = layoutEventStrip(transcript, mode)
+  const start = Math.max(0, layout.totalWidth - w)
+  const truncatedLeft = layout.spans.filter((s) => s.end <= start).length
+  const lane = (l: LaneEvent["lane"]): (StripCell | null)[] =>
+    Array.from({ length: w }, (_, c) => {
+      const cell = layout.lanes[l][start + c]
+      return cell ? { ...cell, eventIndex: cell.eventIndex - truncatedLeft } : null
+    })
+  const lanes: EventStrip["lanes"] = { input: lane("input"), model: lane("model"), tools: lane("tools") }
+  return {
+    events: layout.events.slice(truncatedLeft),
+    width: w,
+    lanes,
+    spans: layout.spans.slice(truncatedLeft).map((s) => ({ start: Math.max(0, s.start - start), end: Math.min(w, s.end - start) })),
+    empty: { input: lanes.input.every((c) => c === null), model: lanes.model.every((c) => c === null), tools: lanes.tools.every((c) => c === null) },
+    truncatedLeft,
+  }
+}
+
+/**
+ * Start cell of the `width`-wide window to draw, so the cursor's event stays on the strip:
+ * keep `prevStart` while the event sits between the margins, otherwise step towards it in
+ * chunks (a far jump lands it a third of a window in from the edge it came from).
+ */
+export function windowFor(layout: EventLayout, cursorEventIndex: number, width: number, prevStart: number | undefined): number {
+  const w = Math.max(1, Math.floor(width))
+  const max = layout.totalWidth - w
+  if (max <= 0) return 0
+  if (prevStart === undefined) return max // a fresh open reads the newest events, like a log tail
+  const start = Math.max(0, Math.min(max, Math.round(prevStart)))
+  const span = layout.spans[cursorEventIndex]
+  if (!span) return start
+  const margin = Math.max(2, Math.floor(w / 8))
+  const lo = start + margin
+  const hi = start + w - margin
+  // second case: an event wider than the window itself is "inside" while it covers the margins
+  if ((span.start >= lo && span.end <= hi) || (span.start <= lo && span.end >= hi)) return start
+  const chunk = Math.max(1, Math.floor(w / 3))
+  const steps = (d: number) => Math.ceil(d / chunk) * chunk
+  const next = span.start < lo ? start - steps(lo - span.start) : start + steps(span.end - hi)
+  return Math.max(0, Math.min(max, next))
+}
+
+/** Minimap of the whole axis, `width` cells: where the drawn window and the failed calls are. */
+export function overviewTrack(layout: EventLayout, start: number, width: number): ("track" | "window" | "error")[] {
+  const w = Math.max(0, Math.floor(width))
+  if (w === 0) return []
+  const total = Math.max(1, layout.totalWidth)
+  const at = (cell: number) => Math.max(0, Math.min(w - 1, Math.floor((cell / total) * w)))
+  const out: ("track" | "window" | "error")[] = Array.from({ length: w }, () => "track")
+  for (let i = at(start); i <= at(start + w - 1); i++) out[i] = "window"
+  layout.events.forEach((e, i) => {
+    if (e.error) out[at(layout.spans[i]!.start)] = "error"
+  })
+  return out
+}
+
+/** Index into `events` of the event a message/part belongs to (-1 if it has none). */
+export function stripIndexFor(strip: { events: LaneEvent[] }, messageID: string, partID?: string): number {
   if (partID) {
     const byPart = strip.events.findIndex((e) => e.partID === partID)
     if (byPart >= 0) return byPart

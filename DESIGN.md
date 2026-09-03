@@ -440,6 +440,14 @@ records as user messages, and can use the headless `/ctree` commands.
 > inverted. Nothing is scaled by token count — height-as-magnitude produced flat or solid lanes on
 > real sessions; tokens live in the row column. When the strip does not fit, the newest events are
 > kept and the count dropped on the left is shown. `src/core/lanes.ts` `buildEventStrip`.
+>
+> **Windowing (0.2.2).** The timeline is laid out unbounded (`layoutEventStrip`) and the strip
+> renders a window of it chosen by `windowFor`: end of the session by default, unchanged while the
+> cursor's event stays inside a scroll-off margin (width/8), shifted in chunks of width/3 when it
+> nears an edge, clamped to the layout. Squashing the whole session into the width was rejected:
+> cells would merge and the pills would stop being countable events. When the layout overflows,
+> a one-line overview track under the lanes shows the window's position and red ticks at failed
+> tool calls, so global orientation survives without giving up pill fidelity.
 
 DSH's Trajectory tab and Pi's `/tree` both render the *same* append-only event
 stream. DSH orders it by **time** and annotates each step with **cost and duration**

@@ -30,6 +30,7 @@ for k in a.keys:
 timed.sort(key=lambda x: x[0])
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[=>]|\x1b\([A-Z]")
 start = time.time(); buf = b""; ki = 0; ci = 0; seen_at = None; mark = 0
+timings = []; last_sent = start
 try:
     import pyte
     screen = pyte.Screen(a.cols, a.rows); stream = pyte.ByteStream(screen)
@@ -83,15 +84,20 @@ while time.time() - start < a.timeout:
     now = time.time() - start
     while ki < len(timed) and now >= timed[ki][0]:
         snapshot(f"before timed key {ki}: {timed[ki][1]!r}")
-        os.write(fd, timed[ki][1]); ki += 1; mark = len(buf)
+        os.write(fd, timed[ki][1]); ki += 1; mark = len(buf); last_sent = time.time()
+        timings.append({"key": ki - 1, "kind": "timed", "text": timed[ki - 1][1].decode("latin1"), "sent_at_ms": round((last_sent - start) * 1000)})
     if ki >= len(timed) and ci < len(cond):
         pat, delay, text, fresh = cond[ci]
         if seen_at is None:
             window = buf[mark:] if fresh else buf[-200000:]
-            if pat.search(ANSI.sub(b"", window).decode("utf8", "replace")): seen_at = time.time()
+            if pat.search(ANSI.sub(b"", window).decode("utf8", "replace")):
+                seen_at = time.time()
+                # latency from the previous key to this pattern appearing on screen
+                timings.append({"key": len(timed) + ci, "kind": "match", "pattern": pat.pattern, "wait_ms": round((seen_at - last_sent) * 1000), "at_ms": round((seen_at - start) * 1000)})
         elif time.time() - seen_at >= delay:
             snapshot(f"before conditional key {ci}: {text!r}")
-            os.write(fd, text); ci += 1; seen_at = None; mark = len(buf)
+            os.write(fd, text); ci += 1; seen_at = None; mark = len(buf); last_sent = time.time()
+            timings.append({"key": len(timed) + ci - 1, "kind": "cond", "text": text.decode("latin1"), "sent_at_ms": round((last_sent - start) * 1000)})
     r, _, _ = select.select([fd], [], [], 0.1)
     if r:
         try: d = os.read(fd, 65536)
@@ -120,6 +126,8 @@ try: os.kill(pid, signal.SIGTERM)
 except Exception: pass
 snapshot("final")
 open(a.out, "wb").write(buf)
+import json
+open(a.out + ".timing.json", "w").write(json.dumps(timings, indent=1))
 if screens:
     with open(a.out + ".screens.txt", "w") as f:
         for label, text in screens:

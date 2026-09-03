@@ -15,7 +15,7 @@ import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
 import { applyCrop, BRANCH_DIALOG, clip as clipTo, copyText, createNamedBranch, executeJump, executeUndo, mergeBranch, mergeDialogOptions, mergeDialogTitle, mergeTargetOf, MERGE_TRUST, ownTurnCount, setLabel, TRUNK_LABEL, UNDO_KEY, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
 import { decisionSummary, exportDecisions, renderDecision } from "../core/decision.js"
-import { buildEventStrip, stripIndexFor, type LaneMode, type StripCell } from "../core/lanes.js"
+import { layoutEventStrip, overviewTrack, stripIndexFor, windowFor, type LaneMode, type StripCell } from "../core/lanes.js"
 import { bar, consumers, type Consumer, type ConsumerEntry } from "../core/consumers.js"
 import { hasEditor } from "./editor.js"
 import fs from "node:fs"
@@ -213,6 +213,7 @@ const HELP = [
   "  right column is tokens; ~ estimated · ⚠ ≥10k · ✂ cropped · ✗ tool error",
   "  ⎇ colours: open green · squashed blue · rejected/discarded red · abandoned grey",
   "  lanes: Input green you / grey context · Model purple answer / grey thinking · Tools orange call / red failed",
+  "  the lanes are a window that follows the cursor: …N / N… are events hidden either side, all = whole session",
 ]
 
 /** `f` opens this as a picker; `F` steps back through it (DESIGN.md §7.5). */
@@ -359,9 +360,20 @@ export function TreeRoute(props: TreeRouteProps) {
   const cols = () => size().cols
   // the `?` pane sits under the rows so the tree stays visible: it takes its space from them
   const helpHeight = () => (panel() === "help" ? Math.min(HELP.length, Math.max(0, size().rows - 12)) : 0)
-  // chrome above/below the rows: padding, header, status, footer (+3 lane lines when lanes are on)
-  const height = () => Math.max(4, size().rows - 8 - (lanesOn() && size().rows >= 12 ? 3 : 0) - helpHeight())
   const width = () => Math.max(60, cols() - 4)
+  // ---- lane geometry (the lanes themselves are further down) ----------------
+  // `height()` budgets rows for the lanes, so the axis and its overview row exist before it.
+  const live = () => (sessionID ? liveTranscript(api, sessionID) : undefined)
+  // 61 = the 12-cell label column + the `N…` cue + the mode legend that follows the Input lane
+  const laneWidth = () => Math.max(10, Math.min(width() - 61, 80))
+  const layout = createMemo(() => layoutEventStrip(live() ?? EMPTY_TRANSCRIPT, laneMode()))
+  /** DESIGN.md §7.6: below 80 columns the strip is the Input lane alone. */
+  const showAllLanes = () => cols() >= 80
+  /** The overview track only exists — and only costs its row — when the timeline overflows. */
+  const laneOverview = () => showAllLanes() && layout().totalWidth > laneWidth()
+  // chrome above/below the rows: padding, header, status, footer (+3 lane lines when lanes are on,
+  // +1 for the overview track)
+  const height = () => Math.max(4, size().rows - 8 - (lanesOn() && size().rows >= 12 ? (laneOverview() ? 4 : 3) : 0) - helpHeight())
   /** Two lines go to the `↑ n more` / `… n more ↓` cues as soon as the list does not fit. */
   const overflow = () => view().rows.length > height() - 2
   const rowsHeight = () => (overflow() ? height() - 2 : height())
@@ -379,7 +391,6 @@ export function TreeRoute(props: TreeRouteProps) {
   // Crops act on the *current* session's context. Spine rows above the fork point carry
   // the ancestor's message IDs, but the current session holds a positional copy of that
   // prefix; the spine map (built from unfiltered transcripts) translates both ways.
-  const live = () => (sessionID ? liveTranscript(api, sessionID) : undefined)
   const currentMessageOf = (row: Row): string | undefined => {
     if (row.kind === "branch" || row.kind === "separator") return undefined
     if (row.sessionID === sessionID) return row.messageID
@@ -528,8 +539,8 @@ export function TreeRoute(props: TreeRouteProps) {
 
   // ---- lanes (DSH event strip) ---------------------------------------------
   // One pill per event on a shared time axis — categorical colour, nothing scaled by tokens.
-  const laneWidth = () => Math.max(10, Math.min(width() - 46, 80))
-  const strip = createMemo(() => buildEventStrip(live() ?? EMPTY_TRANSCRIPT, laneMode(), laneWidth()))
+  // `layout` (above) is the whole session; the lanes draw a `laneWidth()` window of it that
+  // follows the cursor, with `…N`/`N…` cues and the overview track for what is off-screen.
   /** The strip events the cursor sits on; their cells draw inverted, so there is no cursor block.
    *  A step row also owns the thinking pills folded into it (the list shows them as `· Ns thought`),
    *  otherwise the grey reasoning pills would never light up. */
@@ -539,17 +550,32 @@ export function TreeRoute(props: TreeRouteProps) {
     if (!row || row.kind === "branch" || row.kind === "separator") return hit
     const mid = currentMessageOf(row) ?? row.messageID
     const pid = row.kind === "step" ? (currentPartOf(row) ?? row.partID) : undefined
-    const own = stripIndexFor(strip(), mid, pid)
+    const own = stripIndexFor(layout(), mid, pid)
     if (own >= 0) hit.add(own)
-    strip().events.forEach((e, i) => {
+    layout().events.forEach((e, i) => {
       if (e.messageID !== mid) return
       if (row.kind === "turn" ? e.lane === "input" : e.kind === "reasoning") hit.add(i)
     })
     return hit
   })
+  /** The window follows the row's own event, else the first thinking pill folded into it. */
+  const laneCursor = () => cursorEvents().values().next().value ?? -1
+  const [laneStart, setLaneStart] = createSignal<number | undefined>()
+  createEffect(() => {
+    const l = layout()
+    const w = laneWidth()
+    const cursor = laneCursor()
+    setLaneStart((prev) => windowFor(l, cursor, w, prev))
+  })
+  const laneOffset = () => laneStart() ?? Math.max(0, layout().totalWidth - laneWidth())
+  const hiddenLeft = createMemo(() => layout().spans.filter((s) => s.end <= laneOffset()).length)
+  const hiddenRight = createMemo(() => layout().spans.filter((s) => s.start >= laneOffset() + laneWidth()).length)
+  /** `│ Input …12 `: one fixed-width column, so the lanes stay aligned whatever the cues say. */
+  const laneLabel = (name: string, cue = "") => `│ ${name} ${cue}`.padEnd(12)
+  const laneCue = (n: number) => (n > 999 ? "999" : String(n))
   const cellColor = (cell: StripCell): unknown => {
     if (cell.error) return t.error
-    const e = strip().events[cell.eventIndex]
+    const e = layout().events[cell.eventIndex]
     if (!e) return t.textMuted
     if (e.lane === "tools") return t.warning
     if (e.lane === "input") return e.kind === "user" ? t.success : t.textMuted
@@ -558,8 +584,11 @@ export function TreeRoute(props: TreeRouteProps) {
   /** Adjacent cells of the same colour collapse into one <text>, so a lane is a few nodes. */
   const laneRuns = (lane: "input" | "model" | "tools") => {
     const cur = cursorEvents()
+    const start = laneOffset()
+    const w = laneWidth()
     const runs: { text: string; fg: unknown; bg: unknown }[] = []
-    for (const cell of strip().lanes[lane]) {
+    for (let c = 0; c < w; c++) {
+      const cell = layout().lanes[lane][start + c] ?? null
       const sel = cell !== null && cur.has(cell.eventIndex)
       const color = cell === null ? t.textMuted : cellColor(cell)
       const fg = sel ? t.background : color
@@ -573,13 +602,23 @@ export function TreeRoute(props: TreeRouteProps) {
   const inputRuns = createMemo(() => laneRuns("input"))
   const modelRuns = createMemo(() => laneRuns("model"))
   const toolRuns = createMemo(() => laneRuns("tools"))
+  /** The whole timeline in one dim line: where the window is, and every failed call. */
+  const trackRuns = createMemo(() => {
+    const runs: { text: string; fg: unknown }[] = []
+    for (const kind of overviewTrack(layout(), laneOffset(), laneWidth())) {
+      const glyph = kind === "window" ? "━" : kind === "error" ? "·" : "─"
+      const fg = kind === "window" ? t.text : kind === "error" ? t.error : t.textMuted
+      const last = runs[runs.length - 1]
+      if (last && last.fg === fg) last.text += glyph
+      else runs.push({ text: glyph, fg })
+    }
+    return runs
+  })
   // the context window no longer scales anything, but the Input lane still needs its limit
   const contextLimit = createMemo(() => (sessionID ? modelContextLimit(api, sessionID) : undefined))
   // under three turns every lane is one or two pills, which reads as a glitch rather than a strip
   const laneRoom = () => height() >= 12 && panel() === "tree"
   const showLanes = () => laneRoom() && lanesOn() && userTurns() >= 3
-  /** DESIGN.md §7.6: below 80 columns the strip is the Input lane alone. */
-  const showAllLanes = () => cols() >= 80
   /** `1/2/3` turn the DSH lanes on and pick the x-axis; the active one again (or `0`) hides them. */
   function setLane(mode: LaneMode) {
     if (lanesOn() && laneMode() === mode) {
@@ -1282,26 +1321,32 @@ export function TreeRoute(props: TreeRouteProps) {
       <Show when={showLanes()}>
         <box flexDirection="row">
           {/* one expression per label: JSX trims the gap between a text node and an expression */}
-          <text fg={t.textMuted}>{`│ Input  ${strip().truncatedLeft > 0 ? `…${strip().truncatedLeft}` : ""}`}</text>
-          <Show when={!strip().empty.input} fallback={<text fg={t.textMuted}>{"no input".padEnd(laneWidth())}</text>}>
+          <text fg={t.textMuted}>{laneLabel("Input", hiddenLeft() > 0 ? `…${laneCue(hiddenLeft())}` : "")}</text>
+          <Show when={!layout().empty.input} fallback={<text fg={t.textMuted}>{"no input".padEnd(laneWidth())}</text>}>
             <For each={inputRuns()}>{(r) => <text fg={r.fg as never} bg={r.bg as never}>{r.text}</text>}</For>
           </Show>
-          <text fg={t.textMuted}>{`   ${laneMode() === "duration" ? "[1] Duration" : " 1  duration"} · ${laneMode() === "turns" ? "[2] Turns" : " 2  turns"} · ${laneMode() === "calls" ? "[3] Calls" : " 3  calls"} · 0 off`}</text>
+          <text fg={t.textMuted}>{`${(hiddenRight() > 0 ? `${laneCue(hiddenRight())}…` : "").padStart(4).padEnd(5)}${laneMode() === "duration" ? "[1] Duration" : " 1  duration"} · ${laneMode() === "turns" ? "[2] Turns" : " 2  turns"} · ${laneMode() === "calls" ? "[3] Calls" : " 3  calls"} · 0 off`}</text>
         </box>
         <Show when={showAllLanes()}>
           <box flexDirection="row">
-            <text fg={t.textMuted}>{"│ Model  "}</text>
-            <Show when={!strip().empty.model} fallback={<text fg={t.textMuted}>{"no model steps".padEnd(laneWidth())}</text>}>
+            <text fg={t.textMuted}>{laneLabel("Model")}</text>
+            <Show when={!layout().empty.model} fallback={<text fg={t.textMuted}>{"no model steps".padEnd(laneWidth())}</text>}>
               <For each={modelRuns()}>{(r) => <text fg={r.fg as never} bg={r.bg as never}>{r.text}</text>}</For>
             </Show>
           </box>
           <box flexDirection="row">
-            <text fg={t.textMuted}>{"│ Tools  "}</text>
-            <Show when={!strip().empty.tools} fallback={<text fg={t.textMuted}>{"no tool calls".padEnd(laneWidth())}</text>}>
+            <text fg={t.textMuted}>{laneLabel("Tools")}</text>
+            <Show when={!layout().empty.tools} fallback={<text fg={t.textMuted}>{"no tool calls".padEnd(laneWidth())}</text>}>
               <For each={toolRuns()}>{(r) => <text fg={r.fg as never} bg={r.bg as never}>{r.text}</text>}</For>
             </Show>
             <text fg={t.textMuted}>{"   i inspector · s consumers"}</text>
           </box>
+          <Show when={laneOverview()}>
+            <box flexDirection="row">
+              <text fg={t.textMuted}>{laneLabel("all")}</text>
+              <For each={trackRuns()}>{(r) => <text fg={r.fg as never}>{r.text}</text>}</For>
+            </box>
+          </Show>
         </Show>
       </Show>
       <Show when={laneRoom() && lanesOn() && !showLanes()}>

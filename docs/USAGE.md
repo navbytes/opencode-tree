@@ -132,6 +132,11 @@ Palette: **Context tree**, **Branch here**, **Merge branch**, **Decisions**, **L
   default so the first screen is the clean outline; `1/2/3` bring in the lanes, `i` the inspector.
   The lanes are an event strip — one `▬` pill per prompt / model step / tool call on a shared time
   axis, coloured by lane (nothing is scaled by tokens); the row you are on draws inverted.
+- On a long session the lanes are a window on that axis, and the window follows the cursor: move up
+  into older rows (`k`, `gg`) and it scrolls back in steps, `G` returns to the newest. `…12` next to
+  `Input` and `12…` after the lane count the events hidden either side, and the `all` line under
+  `Tools` is the whole timeline in miniature — `━` is the part you are looking at, red `·` is a
+  failed tool call outside it.
 - The header's context string is the same one the prompt gauge shows, character for
   character. The lanes only appear once there are three turns to plot; a session with no
   messages says so instead of drawing an empty frame.

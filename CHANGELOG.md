@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.2 (unreleased)
+
+- Lanes follow the cursor on long sessions. The timeline is laid out in full and the strip shows a
+  window of it: it opens at the newest events, stays put while the cursor moves inside it, and
+  shifts in chunks of a third of the width when the cursor nears an edge, so the highlighted step
+  is always visible (`gg`/`G` jump it to the start/end). Hidden counts (`…37` / `12…`) sit at the
+  edges, and when the timeline overflows a one-line overview track under the lanes shows where
+  the window sits in the whole session, with red ticks at failed tool calls even when they are
+  out of view.
+
 ## 0.2.1 — 2026-09-03
 
 - Lanes: the cursor now highlights the thinking pills folded into the selected row (they never

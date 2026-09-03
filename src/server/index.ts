@@ -17,6 +17,7 @@ import { autoMark, planResultCrop, resultCandidates, topCandidate, type CropRule
 import { planUndo } from "../core/undo.js"
 import { exportDecisions } from "../core/decision.js"
 import { PLUGIN_VERSION } from "../shared/version.js"
+import { debug } from "../shared/debug.js"
 import type { Transcript, TranscriptMessage } from "../core/transcript.js"
 import { parseForkTitle } from "../core/adopt.js"
 import { adoptNativeForks } from "../shared/adopt.js"
@@ -221,7 +222,11 @@ export const server: Plugin = async ({ worktree, client, directory }, options) =
       }))
       if (crops.length === 0) return
 
+      const __t0 = performance.now()
+
       applyCrops(output.messages as unknown as MinimalMessage[], crops)
+
+      debug("transform.applyCrops", { sessionID, messages: output.messages.length, ms: Math.round((performance.now() - __t0) * 100) / 100 })
     },
 
     // DESIGN.md §6.8: decision records survive compaction verbatim
