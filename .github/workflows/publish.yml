@@ -6,6 +6,7 @@ name: Publish to npm
 on:
   release:
     types: [published]
+  workflow_dispatch:     # dispatched on the new tag by release.yml
 
 permissions:
   id-token: write   # mint the OIDC token npm verifies

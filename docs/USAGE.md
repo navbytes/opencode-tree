@@ -162,3 +162,12 @@ a model (`provider/model`): `/ctree branch fix flaky test` names the branch "fix
   storage is never rewritten. `/undo` appends, never deletes.
 - Decision records are ordinary user messages (`noReply`) tagged in part metadata; they are
   re-injected verbatim when OpenCode compacts.
+
+## Releasing (maintainers)
+
+GitHub → Actions → **Release** → *Run workflow*: pick `patch` / `minor` / `major` (or type an
+exact version), leave *dry run* off. The workflow runs typecheck and tests, bumps
+`package.json`, adds a changelog heading if the version has none, commits and tags `vX.Y.Z`
+on `main`, creates the GitHub Release with generated notes, and dispatches the publish
+workflow on that tag, which publishes to npm through trusted publishing (OIDC, no token).
+Tick *dry run* to see the bump without pushing anything.

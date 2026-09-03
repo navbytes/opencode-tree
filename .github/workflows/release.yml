@@ -1,0 +1,86 @@
+name: Release
+
+# One click from the Actions tab: bump the version, commit + tag on main, create the GitHub
+# Release, then dispatch the publish workflow on the new tag (OIDC trusted publishing).
+# The dispatch is explicit because releases created with GITHUB_TOKEN do not trigger workflows.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump"
+        type: choice
+        default: patch
+        options: [patch, minor, major]
+      version:
+        description: "Exact version instead of a bump (e.g. 0.2.0), optional"
+        type: string
+        default: ""
+      dry_run:
+        description: "Do everything except push, release and publish"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # push the bump commit + tag, create the release
+  actions: write    # dispatch publish.yml
+
+concurrency: release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+
+      - name: Bump version, tag, keep the changelog in step
+        id: bump
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          target="${{ inputs.version }}"
+          [ -n "$target" ] || target="${{ inputs.bump }}"
+          version="$(npm version "$target" --no-git-tag-version)"   # prints vX.Y.Z
+          version="${version#v}"
+          if ! grep -q "^## ${version}" CHANGELOG.md; then
+            # a placeholder heading so the changelog never lags behind the tags; edit it after
+            { printf '## %s — %s\n\nSee the GitHub release notes.\n\n' "$version" "$(date -u +%F)"; cat CHANGELOG.md; } > CHANGELOG.tmp
+            # keep the top-level title first if the file starts with one
+            if head -1 CHANGELOG.md | grep -q '^# '; then
+              { head -1 CHANGELOG.md; echo; printf '## %s — %s\n\nSee the GitHub release notes.\n\n' "$version" "$(date -u +%F)"; tail -n +3 CHANGELOG.md; } > CHANGELOG.tmp
+            fi
+            mv CHANGELOG.tmp CHANGELOG.md
+          fi
+          git add package.json CHANGELOG.md
+          git commit -m "$version"
+          git tag -a "v$version" -m "v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Prepared v$version:"; git log --oneline -1
+
+      - name: Push, release, and publish
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          v="${{ steps.bump.outputs.version }}"
+          git push origin main "v$v"
+          gh release create "v$v" --title "v$v" --generate-notes
+          gh workflow run publish.yml --ref "v$v"
+          echo "Released v$v; publish workflow dispatched on the tag."
+
+      - name: Dry run summary
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "Dry run: would push main + tag v${{ steps.bump.outputs.version }}, create the release, and dispatch publish.yml."
+          git show --stat HEAD | head -12
