@@ -38,6 +38,10 @@ e.g. `{ "keybinds": { "open": "ctrl+t", "up": "k,up", "copy": "none" } }` — na
 unfold toggle go branch label filter_pick filter_prev search search_next search_prev back
 crop crop_toggle_mode mark auto undo merge inspector consumers copy mode_duration mode_turns
 mode_calls lanes_off decisions export help`.
+- On long sessions the lanes show a window of the timeline: it opens at the newest events, stays
+  put while the cursor moves inside it, and follows the cursor in steps when it nears an edge
+  (`gg`/`G` jump it to the start/end). `…37` / `12…` at the edges count hidden events, and a dim
+  `all` track under the lanes shows where the window sits, with red ticks at failed tool calls.
 
 ## Upgrading
 
