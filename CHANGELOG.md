@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1 — 2026-09-03
+
+- Lanes: the cursor now highlights the thinking pills folded into the selected row (they never
+  lit up before); the `?` legend explains the lane colours (Input green you / grey context ·
+  Model purple answer / grey thinking · Tools orange call / red failed).
+- `?` help and `/ctree status` print the running plugin version.
+- Docs: how to upgrade (OpenCode pins the version it installed and does not re-check `@latest`;
+  pin a version with `opencode plugin opencode-context-tree@<version> -g --force`), and a note
+  that the trajectory panels are off by default (`1/2/3` show them, `i` the inspector).
+
 ## 0.2.0 — 2026-09-03 — UI/UX pass from a four-lens review
 
 Findings from reviewers with lazygit/tig, k9s/btop, Helix/fzf and agent-tooling PM backgrounds,
