@@ -1,0 +1,45 @@
+name: Publish to npm
+
+# Trusted publishing (OIDC): no npm token is stored anywhere. npm accepts the publish
+# because this repo + this workflow file are registered as the package's trusted publisher
+# (`npm trust github opencode-context-tree --file publish.yml --repo navbytes/opencode-tree`).
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write   # mint the OIDC token npm verifies
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+
+      # `prepack` runs `bun run build`, so Bun must be on PATH when npm packs.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # npm CLI >= 11.5.1 / Node >= 22.14 are required for OIDC trusted publishing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+
+      - name: Release tag must match package.json version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "release tag v$tag does not match package.json version $pkg" >&2
+            exit 1
+          fi
+
+      - run: npm publish --provenance --access public
