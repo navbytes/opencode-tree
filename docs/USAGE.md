@@ -202,3 +202,21 @@ Tick *dry run* to see the version it would cut without doing anything.
 The tag is the version: `package.json` on `main` says `0.0.0-dev` and is stamped from the tag at
 publish time, so no commit ever has to land on the protected branch. Keep `CHANGELOG.md` by hand
 (the workflow warns when the section for the new version is missing).
+
+## Performance
+
+Measured on commit `ace3d18` (OpenCode 1.18.26, macOS, 120-column pty, key-to-paint latency
+from the harness driver's timing log; sessions built against the instant mock provider):
+
+| session | rows | `/tree` open | `gg` | `G` | lanes `1` | `/` | consumers `s` | TUI RSS |
+|---|---|---|---|---|---|---|---|---|
+| 57 messages (real model) | 53 | 37 ms | – | – | 7 ms | 2 ms | 4 ms | – |
+| 117 messages (50 turns) | 117 | 34 ms | 6 ms | 4 ms | 8 ms | 2 ms | 3 ms | 37 MB |
+| 234 messages (100 turns) | 234 | 36 ms | 7 ms | 5 ms | 3 ms | 1 ms | 3 ms | 37 MB |
+| 467 messages (200 turns) | 467 | 32 ms | 6 ms | 4 ms | 6 ms | 1 ms | 4 ms | 37 MB |
+
+Startup to the prompt: +70 ms with the plugin (2.6 s vs 2.5 s). Headless `/ctree status` on 467
+messages: 0.2 s. The crop transform that runs on every model request: 0.78 ms at 484 messages
+with 66 active crops (0.03–0.27 ms on a 50-message session). Journals: 7–11 KB after a full
+session with three branches, two records and several crops.
+

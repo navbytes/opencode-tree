@@ -2,6 +2,21 @@
 
 ## 0.2.2 (unreleased)
 
+Found by a long driven session on a real model (13 tool-using turns, three fork paths, three
+merge paths, result and turn crops, undo, resume) and 50/100/200-turn scale runs:
+
+- The context gauge counts cached prompt tokens (`tokens.cache.read`/`write`). On caching
+  providers it showed ~200 when the real context was 28k, which also skewed the bands, the red
+  and compaction toasts and the consumers view.
+- `/tree` no longer caps the outline at the ~100 most recent messages OpenCode's TUI keeps in
+  memory: the current session is fetched in full once per open and merged with the live state,
+  so turn 1 is reachable (`gg`) and croppable in a 200-turn session.
+- Squash without LLM with no `$EDITOR` now asks for the record's Outcome and Why in-app, and
+  no merge path writes a record that still contains template placeholders.
+- Adopted native forks are named by their session title in the merge/discard dialogs and
+  `/ctree status`; decision records carry the real model; two branches off one anchor keep both
+  labels (`⎇ a, ⎇ b`); the merge title counts the branch's own turns; `m` on a trunk with no
+  open branch says so.
 - Lanes follow the cursor on long sessions. The timeline is laid out in full and the strip shows a
   window of it: it opens at the newest events, stays put while the cursor moves inside it, and
   shifts in chunks of a third of the width when the cursor nears an edge, so the highlighted step
