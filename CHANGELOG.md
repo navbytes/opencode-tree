@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased) — UI/UX pass from a four-lens review
+## 0.2.0 — 2026-09-03 — UI/UX pass from a four-lens review
 
 Findings from reviewers with lazygit/tig, k9s/btop, Helix/fzf and agent-tooling PM backgrounds,
 working from real screenshots.
