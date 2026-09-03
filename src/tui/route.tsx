@@ -212,6 +212,7 @@ const HELP = [
   "  dim rows are not sent to the model; ── not in this branch's context ── is where your path forked",
   "  right column is tokens; ~ estimated · ⚠ ≥10k · ✂ cropped · ✗ tool error",
   "  ⎇ colours: open green · squashed blue · rejected/discarded red · abandoned grey",
+  "  lanes: Input green you / grey context · Model purple answer / grey thinking · Tools orange call / red failed",
 ]
 
 /** `f` opens this as a picker; `F` steps back through it (DESIGN.md §7.5). */
@@ -529,13 +530,22 @@ export function TreeRoute(props: TreeRouteProps) {
   // One pill per event on a shared time axis — categorical colour, nothing scaled by tokens.
   const laneWidth = () => Math.max(10, Math.min(width() - 46, 80))
   const strip = createMemo(() => buildEventStrip(live() ?? EMPTY_TRANSCRIPT, laneMode(), laneWidth()))
-  /** The strip event the cursor sits on; its cells draw inverted, so there is no cursor block. */
-  const cursorEvent = createMemo(() => {
+  /** The strip events the cursor sits on; their cells draw inverted, so there is no cursor block.
+   *  A step row also owns the thinking pills folded into it (the list shows them as `· Ns thought`),
+   *  otherwise the grey reasoning pills would never light up. */
+  const cursorEvents = createMemo<Set<number>>(() => {
     const row = current()
-    if (!row || row.kind === "branch" || row.kind === "separator") return -1
+    const hit = new Set<number>()
+    if (!row || row.kind === "branch" || row.kind === "separator") return hit
     const mid = currentMessageOf(row) ?? row.messageID
     const pid = row.kind === "step" ? (currentPartOf(row) ?? row.partID) : undefined
-    return stripIndexFor(strip(), mid, pid)
+    const own = stripIndexFor(strip(), mid, pid)
+    if (own >= 0) hit.add(own)
+    strip().events.forEach((e, i) => {
+      if (e.messageID !== mid) return
+      if (row.kind === "turn" ? e.lane === "input" : e.kind === "reasoning") hit.add(i)
+    })
+    return hit
   })
   const cellColor = (cell: StripCell): unknown => {
     if (cell.error) return t.error
@@ -547,10 +557,10 @@ export function TreeRoute(props: TreeRouteProps) {
   }
   /** Adjacent cells of the same colour collapse into one <text>, so a lane is a few nodes. */
   const laneRuns = (lane: "input" | "model" | "tools") => {
-    const cur = cursorEvent()
+    const cur = cursorEvents()
     const runs: { text: string; fg: unknown; bg: unknown }[] = []
     for (const cell of strip().lanes[lane]) {
-      const sel = cell !== null && cell.eventIndex === cur
+      const sel = cell !== null && cur.has(cell.eventIndex)
       const color = cell === null ? t.textMuted : cellColor(cell)
       const fg = sel ? t.background : color
       const bg = sel ? color : undefined
