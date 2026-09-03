@@ -27,6 +27,11 @@ First working version, built against OpenCode 1.18.26.
 - Headless `/ctree status|branch|merge --discard|crop|undo|decisions [--export]` for
   non-TUI clients; `/ctree branch` mirrors the tree linkage into `session.metadata`.
 - Options: `storage`, `jumpSummary`, `hardCrop`, `keybinds` (including `open`).
+- `/tree` is now a Pi-style outline of the whole session tree by default: one content-forward row
+  per message and tool step (`● user:` / `○ assistant:` / `⚙ [bash $ …]`), branches drawn at their
+  fork points with `│ ├ ╰` connectors and folded to their `⎇` header until opened; from any session
+  you see the whole tree, your branch open with `← here`. The DeepSeek-Harness trajectory (Input/
+  Model/Tools lanes, per-step inspector) is off by default and one keystroke away (`1/2/3`, `i`).
 - Off-path branches: siblings and the trunk's continuation that are not on the active path
   appear as `┆⎇` rows at the bottom of the tree; `→` expands them, `⏎` switches. The trunk's
   own continuation reads `trunk continues` — it is not a branch of itself.

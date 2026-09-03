@@ -9,7 +9,7 @@ import { planJump } from "../core/actions.js"
 import { foldJournal, type TreeState } from "../core/journal.js"
 import { cycleFilter, moveSelection, nextBranchIndex, resolveSelection, toggleExpanded } from "../core/navigation.js"
 import { bandFor, contextSizeOf, formatContext, formatK, type MinimalMessage } from "../core/tokens.js"
-import { buildSpineMap, buildTreeView, type Filter, type Row } from "../core/tree.js"
+import { buildSpineMap, buildTreeView, currentChainOf, type Filter, type Row } from "../core/tree.js"
 import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
 import { applyCrop, BRANCH_DIALOG, createNamedBranch, executeJump, executeUndo, mergeBranch, mergeDialogOptions, mergeDialogTitle, MERGE_TRUST, setLabel, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
@@ -63,44 +63,49 @@ function fitRow(body: string, tokens: string, width: number): string {
   return `${clipped} ${tokens}`
 }
 
-function rowLine(row: Row, width: number): string {
-  const tokens = `${row.kind !== "branch" && row.estimated ? "~" : ""}${formatK(row.tokens)}`
-  let body: string
-  switch (row.kind) {
-    case "turn": {
-      const marker = `T${row.turn}`.padEnd(3)
-      const label = row.label ? ` [${row.label}]` : ""
-      const glyph = row.isDecision ? "◆" : row.isSummary ? "◇" : row.glyph
-      body = `${marker} ${row.gutter}${glyph} ${row.isDecision ? "decision " : row.isSummary ? "summary  " : "user     "} ${plain(row.preview)}${label}`
-      break
-    }
-    case "step": {
-      const flags = `${row.label ? ` [${row.label}]` : ""}${row.isCropped ? " ✂" : ""}${row.warn ? " ⚠" : ""}${row.isError ? " ✗" : ""}`
-      const dur = row.durationMs !== undefined ? ` ${(row.durationMs / 1000).toFixed(row.durationMs < 10_000 ? 1 : 0)}s` : ""
-      body = `    ${row.gutter}${row.glyph} ${row.glyph === "⚙" ? "tool     " : row.glyph === "◇" ? "compact  " : "assistant"} ${plain(row.preview)}${flags}${dur}`
-      break
-    }
-    case "branch": {
-      const model = row.model ? ` · ${row.model.split("/").pop()}` : ""
-      const fold = row.expanded ? "▾" : "▸"
-      const turns = `${row.turns} turn${row.turns === 1 ? "" : "s"}`
-      const here = row.isCurrent ? "  ← here" : ""
-      // an ancestor's tail is the trunk carrying on, not a branch of it: no name or status
-      body = row.ancestor
-        ? `    ${row.gutter} trunk continues  ${fold} ${turns}`
-        : row.turns === 0
-          ? // nothing to expand yet: a ▸ caret here reads as a broken/empty branch
-            `    ${row.gutter} ${row.name}  ${row.status} · just branched, nothing here yet${here}`
-          : `    ${row.gutter} ${row.name}  ${fold} ${row.status} · ${turns}${model}${here}`
-      break
-    }
-  }
-  return fitRow(body, tokens, width)
+/** Display glyph, from the row's semantic flags rather than the stored glyph. */
+function glyphOf(row: Exclude<Row, { kind: "branch" }>): string {
+  if (row.kind === "turn") return row.isDecision ? "◆" : row.isSummary ? "≣" : "●"
+  if (row.glyph === "⚙") return "⚙"
+  if (row.glyph === "◇") return "≣" // OpenCode-native compaction summary
+  return "○"
 }
 
-/** Column header over the rows, aligned with `rowLine`'s right-hand token column. */
-function columnHeader(width: number): string {
-  return fitRow("turn  step", "tokens", width)
+/** Content-forward row text — Pi's outline × DSH's trajectory: `user:` / `assistant:` inline,
+ *  tool steps as `[bash $ …]` / `[tool: arg] → out` (from partPreview), decisions/summaries
+ *  labelled. The gutter (drawn separately) carries the tree structure, not fixed columns. */
+function textOf(row: Exclude<Row, { kind: "branch" }>): string {
+  if (row.kind === "turn") {
+    if (row.isDecision) return plain(row.preview).replace(/^◆\s*/, "").replace(/^#+\s*/, "")
+    if (row.isSummary) return plain(row.preview)
+    return `user: ${plain(row.preview)}`
+  }
+  if (row.glyph === "⚙" || row.glyph === "◇") return plain(row.preview)
+  return `assistant: ${plain(row.preview)}`
+}
+
+function rowLine(row: Row, width: number, here: boolean): string {
+  const tokens = `${row.kind !== "branch" && row.estimated ? "~" : ""}${formatK(row.tokens)}`
+  const marker = here ? "  ← here" : ""
+  let body: string
+  if (row.kind === "branch") {
+    const model = row.model ? ` · ${row.model.split("/").pop()}` : ""
+    const fold = row.expanded ? "▾" : "▸"
+    const turns = `${row.turns} turn${row.turns === 1 ? "" : "s"}`
+    // nothing to expand yet: a ▸ caret here reads as a broken/empty branch
+    const meta = row.turns === 0 ? `${row.status} · just branched, nothing here yet` : `${fold} ${row.status} · ${turns}${model}`
+    body = `${row.gutter} ${row.name}  ${meta}${marker}`
+  } else {
+    const flags =
+      row.kind === "step"
+        ? `${row.label ? ` [${row.label}]` : ""}${row.isCropped ? " ✂" : ""}${row.warn ? " ⚠" : ""}${row.isError ? " ✗" : ""}`
+        : row.label
+          ? ` [${row.label}]`
+          : ""
+    const dur = row.kind === "step" && row.durationMs !== undefined ? ` ${(row.durationMs / 1000).toFixed(row.durationMs < 10_000 ? 1 : 0)}s` : ""
+    body = `${row.gutter}${glyphOf(row)} ${textOf(row)}${flags}${dur}${marker}`
+  }
+  return fitRow(body, tokens, width)
 }
 
 const DEFAULT_KEYS: Record<string, string[]> = {
@@ -129,6 +134,7 @@ const DEFAULT_KEYS: Record<string, string[]> = {
   mode_duration: ["1"],
   mode_turns: ["2"],
   mode_calls: ["3"],
+  lanes_off: ["0"],
   decisions: ["shift+d"],
   export: ["shift+e"],
   label: ["shift+l"],
@@ -144,19 +150,19 @@ const NO_BRANCHES = "No branches yet · b forks here into a real OpenCode sessio
 /** The `?` overlay: unindented lines are headings, indented ones body (see the render). */
 const HELP = [
   "? help · ? or esc closes",
-  "Reading the screen",
-  "  rows are the active path, oldest first; T<n> counts turns along it",
-  "  trunk = the session you started · ⎇ = a branch: a real, separate OpenCode session",
-  "  ⎇ rows hang off the message they were forked from; ← here is the one you are in",
-  "  ┆⎇ rows are elsewhere in the tree: siblings, or the trunk past your fork point",
-  "  ▾ expanded / ▸ folded — → and ← (or e) open and close a branch inline",
-  "  the right-hand column is tokens; ~ means estimated (chars/4)",
-  "  ⚠ ≥10k tokens · ✂ cropped · ◆ decision record · ◇ summary · ✗ tool error",
+  "Reading the screen — a whole-tree outline (Pi) fused with a trajectory (DSH)",
+  "  the entire tree, oldest first: trunk at the left, branches nested at their fork point",
+  "  ● user: … · ○ assistant: … · ⚙ [bash $ …] / [tool: arg] → out · ◆ decision · ≣ summary",
+  "  ⎇ = a branch: a real, separate OpenCode session, hung off the message it forked from",
+  "  │ ├ ╰ connectors draw the branch topology; ← here marks the session you are in",
+  "  ▾ open / ▸ folded — the path to where you are is open by default; → ← (or e) toggle a branch",
+  "  right column is tokens; ~ means estimated · ⚠ ≥10k · ✂ cropped · ✗ tool error",
   "Keys",
   "  move   ↑↓ j k · J K by 20 · g G first/last · [ ] branch rows · → ← e fold",
-  "  act    ⏎ go here · b branch · m merge · c crop · x undo · L label · y copy",
+  "  act    ⏎ go/switch · b branch · m merge · c crop · x undo · L label · y copy",
   "         in crop mode: space mark · a auto · t result⇄turn · ⏎ apply · esc leave",
-  "  views  i inspector · u consumers · D decisions · E export · 1 2 3 lanes · f filter · / search · q back",
+  "  DSH    i inspector (Status/Payload/Result/Timing) · 1 2 3 lanes (Duration/Turns/Calls) · 0 off",
+  "  views  u consumers · D decisions · E export · f filter · / search · q back",
 ]
 
 /** Plugin option `keybinds: { <command>: "k,up" | [..] | "none" }` overrides DEFAULT_KEYS. */
@@ -184,7 +190,10 @@ export function TreeRoute(props: TreeRouteProps) {
   const [cropMode, setCropMode] = createSignal<"result" | "turn" | undefined>()
   const [panel, setPanel] = createSignal<"tree" | "decisions" | "consumers" | "help">(props.initialView ?? "tree")
   const [laneMode, setLaneMode] = createSignal<LaneMode>(api.kv.get<LaneMode>("ctree.lanes", "turns"))
-  const [inspector, setInspector] = createSignal<boolean>(api.kv.get<boolean>("ctree.inspector", true))
+  // DSH lanes and inspector are first-class but off by default, so the first screen reads as
+  // Pi's clean outline (header + tree + footer); `1/2/3` and `i` bring them in, one keystroke.
+  const [lanesOn, setLanesOn] = createSignal<boolean>(api.kv.get<boolean>("ctree.lanesOn", false))
+  const [inspector, setInspector] = createSignal<boolean>(api.kv.get<boolean>("ctree.inspector", false))
   const [consumerIndex, setConsumerIndex] = createSignal(0)
   const [decisionIndex, setDecisionIndex] = createSignal(0)
   const [marked, setMarked] = createSignal<Set<string>>(new Set())
@@ -209,7 +218,16 @@ export function TreeRoute(props: TreeRouteProps) {
       if (st.root) ids.add(st.root)
       ids.delete(sessionID)
       const cached = others()
-      const wanted = [...ids].filter((id) => !cached[id] || (st.sessions[id]?.status ?? "open") === "open")
+      const onPath = new Set(currentChainOf(st, sessionID))
+      const wanted = [...ids].filter((id) => {
+        const tr = cached[id]
+        // uncached, or an open (still-mutable) branch: always (re)fetch
+        if (!tr || (st.sessions[id]?.status ?? "open") === "open") return true
+        // a closed on-path ancestor whose single fetch failed comes back status:"deleted"; without
+        // this it would never retry and its rows would stay missing from the tree (core keeps the
+        // current session visible meanwhile). Retry while it is still missing/deleted.
+        return onPath.has(id) && tr.status === "deleted"
+      })
       if (wanted.length === 0) return
       const loaded = await Promise.all(wanted.map((id) => fetchTranscript(api, id, directory)))
       if (seq !== fetchSeq) return
@@ -275,8 +293,8 @@ export function TreeRoute(props: TreeRouteProps) {
   api.renderer.on("resize", onResize)
   onCleanup(() => void api.renderer.off("resize", onResize))
   const cols = () => size().cols
-  // chrome above/below the rows: padding, header, lanes, status, column header, footer
-  const height = () => Math.max(8, size().rows - 8 - (size().rows >= 12 ? 3 : 0))
+  // chrome above/below the rows: padding, header, status, footer (+3 lane lines when lanes are on)
+  const height = () => Math.max(8, size().rows - 8 - (lanesOn() && size().rows >= 12 ? 3 : 0))
   const width = () => Math.max(60, cols() - 4)
   const windowStart = createMemo(() => {
     const h = height()
@@ -451,9 +469,21 @@ export function TreeRoute(props: TreeRouteProps) {
   const contextLimit = createMemo(() => (sessionID ? modelContextLimit(api, sessionID) : undefined))
   // under three turns every bar is either full or empty, which reads as "context full"
   const laneRoom = () => height() >= 12 && panel() === "tree"
-  const showLanes = () => laneRoom() && userTurns() >= 3
+  const showLanes = () => laneRoom() && lanesOn() && userTurns() >= 3
   /** DESIGN.md §7.6: below 80 columns the minimap is the Input sparkline alone. */
   const showAllLanes = () => cols() >= 80
+  /** `1/2/3` turn the DSH lanes on and pick the x-axis; the active one again (or `0`) hides them. */
+  function setLane(mode: LaneMode) {
+    if (lanesOn() && laneMode() === mode) {
+      setLanesOn(false)
+      api.kv.set("ctree.lanesOn", false)
+      return
+    }
+    setLaneMode(mode)
+    setLanesOn(true)
+    api.kv.set("ctree.lanes", mode)
+    api.kv.set("ctree.lanesOn", true)
+  }
 
   // ---- inspector -----------------------------------------------------------
   const showInspector = () => inspector() && panel() === "tree" && cols() >= 110
@@ -477,12 +507,10 @@ export function TreeRoute(props: TreeRouteProps) {
       if (lines.length > max) muted(`          … ${lines.length - max} more lines (y to copy)`)
     }
     if (row.kind === "branch") {
-      head(row.ancestor ? `┆ ${row.name} continues` : `⎇ ${row.name}`)
-      if (!row.ancestor) {
-        kv("Status", row.status)
-        if (row.note) muted(`note: ${row.note}`)
-        kv("Parent", others()[row.parentSessionID]?.title ?? row.parentSessionID)
-      }
+      head(`⎇ ${row.name}`)
+      kv("Status", row.status)
+      if (row.note) muted(`note: ${row.note}`)
+      kv("Parent", others()[row.parentSessionID]?.title ?? row.parentSessionID)
       kv("Anchor", row.anchorMessageID.slice(0, 20))
       kv("Turns", String(row.turns))
       kv("Tokens", `~${formatK(row.tokens)}`)
@@ -743,8 +771,11 @@ export function TreeRoute(props: TreeRouteProps) {
     if (!row) return
     const target = row.kind === "branch" ? row.sessionID : row.depth > 0 ? row.sessionID : undefined
     if (!target) return
-    const has = expanded().has(target)
-    if (open === has) return
+    // the row's resolved state, not raw set membership: on-path branches start open, so
+    // `expanded` membership inverts there (see tree.ts shownExpanded). A visible nested row
+    // means its branch is shown; a branch row carries its resolved state in `expanded`.
+    const shown = row.kind === "branch" ? row.expanded : true
+    if (open === shown) return
     const next = toggleExpanded(expanded(), target)
     setExpanded(next)
     api.kv.set(`ctree.expanded.${sessionID}`, [...next])
@@ -882,9 +913,10 @@ export function TreeRoute(props: TreeRouteProps) {
       { name: "ctree.inspector", hidden: true, run: () => { setInspector(!inspector()); api.kv.set("ctree.inspector", inspector()) } },
       { name: "ctree.consumers", hidden: true, run: () => setPanel(panel() === "consumers" ? "tree" : "consumers") },
       { name: "ctree.copy", hidden: true, run: () => copySelected() },
-      { name: "ctree.mode_duration", hidden: true, run: () => { setLaneMode("duration"); api.kv.set("ctree.lanes", "duration") } },
-      { name: "ctree.mode_turns", hidden: true, run: () => { setLaneMode("turns"); api.kv.set("ctree.lanes", "turns") } },
-      { name: "ctree.mode_calls", hidden: true, run: () => { setLaneMode("calls"); api.kv.set("ctree.lanes", "calls") } },
+      { name: "ctree.mode_duration", hidden: true, run: () => setLane("duration") },
+      { name: "ctree.mode_turns", hidden: true, run: () => setLane("turns") },
+      { name: "ctree.mode_calls", hidden: true, run: () => setLane("calls") },
+      { name: "ctree.lanes_off", hidden: true, run: () => { setLanesOn(false); api.kv.set("ctree.lanesOn", false) } },
       { name: "ctree.decisions", hidden: true, run: () => setPanel(panel() === "decisions" ? "tree" : "decisions") },
       { name: "ctree.export", hidden: true, enabled: () => panel() === "decisions", run: () => exportDecisionsFile() },
       { name: "ctree.help", hidden: true, run: () => setPanel(panel() === "help" ? "tree" : "help") },
@@ -939,7 +971,7 @@ export function TreeRoute(props: TreeRouteProps) {
           </box>
         </Show>
       </Show>
-      <Show when={laneRoom() && !showLanes()}>
+      <Show when={laneRoom() && lanesOn() && !showLanes()}>
         <text fg={t.textMuted}>│ lanes appear after 3 turns</text>
       </Show>
       <text fg={cropMode() ? t.warning : t.textMuted}>
@@ -985,9 +1017,6 @@ export function TreeRoute(props: TreeRouteProps) {
       <Show when={panel() === "tree" && view().rows.length === 0}>
         <text fg={t.textMuted}>│ (no messages yet — chat first, then open the tree)</text>
       </Show>
-      <Show when={panel() === "tree" && view().rows.length > 0}>
-        <text fg={t.textMuted}>│ {cropMode() ? "    " : ""}{columnHeader(rowWidth())}</text>
-      </Show>
       <box flexDirection="row" flexGrow={1}>
       <box flexDirection="column" flexGrow={1}>
       <For each={panel() === "tree" ? visible() : []}>
@@ -1006,7 +1035,7 @@ export function TreeRoute(props: TreeRouteProps) {
           return (
             <text fg={isSel() ? t.background : (color() as never)} bg={isSel() ? t.primary : undefined}>
               {isSel() ? "›" : "│"} {mark()}
-              {rowLine(row, rowWidth())}
+              {rowLine(row, rowWidth(), row.id === view().currentRowId)}
             </text>
           )
         }}
@@ -1022,7 +1051,7 @@ export function TreeRoute(props: TreeRouteProps) {
       </Show>
       </box>
       <text fg={cropMode() ? t.warning : t.textMuted}>
-        └ {cropMode() ? "space mark  a auto  t result⇄turn  ⏎ apply  esc leave" : "⏎ go  b branch  m merge  c crop  x undo  ? help  q back"}
+        └ {cropMode() ? "space mark  a auto  t result⇄turn  ⏎ apply  esc leave" : "⏎ go  b branch  m merge  c crop  i inspector  1·2·3 lanes  x undo  ? help  q back"}
       </text>
     </box>
   )

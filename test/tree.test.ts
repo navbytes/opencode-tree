@@ -66,11 +66,11 @@ describe("buildTreeView expanded + from a branch", () => {
     // the branch's own rows use the branch's message IDs, not the copied prefix
     expect(nested.find((r) => r.kind === "turn")!.messageID).toBe("om1")
   })
-  test("viewing from the open branch: spine = trunk segment (trunk IDs) + own tail, sibling branch still shown", () => {
+  test("viewing from a branch draws the whole tree: trunk, your branch open, its sibling folded", () => {
     const view = buildTreeView({ state: f.state, transcripts: f.transcripts, currentSessionID: OPEN, expanded: new Set(), filter: "default" })
-    // the branch you are on is marked at its anchor, its own rows nested under it; the trunk
-    // kept going after the fork (m3/a3), so it is offered as an "elsewhere" row
-    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "├⎇try-redis", "╰⎇fix-flaky-test", "T3", "│ ⚙", "│ ○", "T4", "│ ○", "┆⎇Fix flaky test"])
+    // the branch you are on is open (on the current path), its rows nested; the trunk keeps
+    // going after the fork (m3/a3) and is drawn inline, and try-redis stays folded at the anchor
+    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "├⎇try-redis", "╰⎇fix-flaky-test", "T3", "│ ⚙", "│ ○", "T4", "│ ○", "T3", "○"])
     const marker = view.rows.find((r) => r.kind === "branch" && r.isCurrent)!
     expect(marker.kind === "branch" && [marker.name, marker.turns, marker.expanded]).toEqual(["fix-flaky-test", 2, true])
     expect(view.rows.filter((r) => r.kind === "branch" && r.sessionID === OPEN).length).toBe(1)
@@ -81,19 +81,22 @@ describe("buildTreeView expanded + from a branch", () => {
     expect(t3.sessionID).toBe(OPEN)
     expect(t3.kind === "turn" && t3.messageID).toBe("om1")
     expect(view.totalTokens).toBe(6012) // oa2's tokens.input + its own tokens.output
-    expect(view.currentRowId).toBe(view.rows.at(-2)!.id)
+    // currentRowId is the current session's tip — the last OPEN row, not the trunk's tail
+    const openTip = view.rows.filter((r) => r.kind !== "branch" && r.sessionID === OPEN).at(-1)!
+    expect(view.currentRowId).toBe(openTip.id)
   })
   test("a fork with no messages of its own is still visible, and is where the cursor lands", () => {
     const prefixOnly = { ...f.transcripts[OPEN]!, messages: f.transcripts[OPEN]!.messages.slice(0, 4) }
     const view = buildTreeView({ state: f.state, transcripts: { ...f.transcripts, [OPEN]: prefixOnly }, currentSessionID: OPEN, expanded: new Set(), filter: "default" })
-    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "├⎇try-redis", "╰⎇fix-flaky-test", "┆⎇Fix flaky test"])
+    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "├⎇try-redis", "╰⎇fix-flaky-test", "T3", "○"])
     const marker = view.rows.find((r) => r.kind === "branch" && r.isCurrent)!
     expect(marker.kind === "branch" && [marker.turns, marker.tokens]).toEqual([0, 0])
     expect(view.currentRowId).toBe(marker.id)
   })
-  test("a filter that hides branches hides the marker row and its indentation too", () => {
+  test("a filter that hides branches keeps only the current path, flat and un-indented", () => {
     const view = buildTreeView({ state: f.state, transcripts: f.transcripts, currentSessionID: OPEN, expanded: new Set(), filter: "user-only" })
-    expect(shape(view.rows)).toEqual(["T1", "T2", "T3", "T4"])
+    // trunk turns T1/T2, the current branch's own turns T3/T4, and the trunk's own last turn
+    expect(shape(view.rows)).toEqual(["T1", "T2", "T3", "T4", "T3"])
     expect(view.rows.every((r) => r.gutter === "")).toBe(true)
   })
 })
@@ -125,28 +128,30 @@ describe("branches off the rendered path", () => {
   const f = buildOffPathFixture()
   const view = buildTreeView({ state: f.state, transcripts: f.transcripts, currentSessionID: EARLY, expanded: new Set(), filter: "default" })
 
-  test("the trunk tail and the branch anchored past the fork point are offered below the path", () => {
-    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "╰⎇early", "T3", "│ ○", "┆⎇Fix flaky test", "┆⎇late"])
-    const elsewhere = view.rows.filter((r) => r.kind === "branch" && !r.isCurrent)
-    expect(elsewhere.map((r) => r.kind === "branch" && [r.sessionID, r.status, r.turns, r.last])).toEqual([
-      [TRUNK, "open", 1, false],
-      [LATE, "open", 1, true],
+  test("the whole tree is drawn from the root: your branch open, siblings folded at their own anchors", () => {
+    // `early` forked at a2 (open, on the path); the trunk keeps going to T3/a3; `late` forked
+    // at a3 so it now hangs off the trunk's own T3, folded — no separate 'elsewhere' group
+    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "╰⎇early", "T3", "│ ○", "T3", "○", "╰⎇late"])
+    const branches = view.rows.filter((r) => r.kind === "branch")
+    expect(branches.map((r) => r.kind === "branch" && [r.name, r.status, r.turns, r.isCurrent])).toEqual([
+      ["early", "open", 1, true],
+      ["late", "open", 1, false],
     ])
-    expect(elsewhere[0]!.kind === "branch" && elsewhere[0]!.tokens).toBeGreaterThan(0)
-    // the trunk's own continuation is not a branch of itself: the route labels it differently
-    expect(elsewhere.map((r) => r.kind === "branch" && r.ancestor)).toEqual([true, undefined])
+    const late = branches.find((r) => r.kind === "branch" && r.name === "late")!
+    expect(late.kind === "branch" && [late.gutter, late.expanded, late.last]).toEqual(["╰⎇", false, true])
+    expect(late.kind === "branch" && late.tokens).toBeGreaterThan(0)
   })
-  test("⏎ on one of them switches to that session, and is a noop on your own marker row", () => {
+  test("⏎ on a branch header switches to that session, and is a noop on your own", () => {
     for (const row of view.rows.filter((r) => r.kind === "branch")) {
       expect(planJump(row, { transcripts: f.transcripts, currentSessionID: EARLY })).toEqual(
         row.sessionID === EARLY ? { kind: "noop", reason: "you are here" } : { kind: "switch", sessionID: row.sessionID },
       )
     }
   })
-  test("expanding the trunk row shows its post-fork turns inline, with `late` back at its anchor", () => {
-    const expanded = buildTreeView({ state: f.state, transcripts: f.transcripts, currentSessionID: EARLY, expanded: new Set([TRUNK]), filter: "default" })
-    expect(shape(expanded.rows).slice(-4)).toEqual(["┆⎇Fix flaky test", "T3", "│ ○", "╰⎇late"])
-    expect(expanded.rows.at(-2)!.sessionID).toBe(TRUNK)
+  test("expanding a folded sibling shows its post-fork turns inline under its own anchor", () => {
+    const expanded = buildTreeView({ state: f.state, transcripts: f.transcripts, currentSessionID: EARLY, expanded: new Set([LATE]), filter: "default" })
+    expect(shape(expanded.rows).slice(-3)).toEqual(["╰⎇late", "T4", "│ ○"])
+    expect(expanded.rows.at(-1)!.sessionID).toBe(LATE)
   })
   test("nothing is duplicated when every branch is already on the path", () => {
     const g = buildFixture()
@@ -170,11 +175,111 @@ describe("a fork of a fork", () => {
   const transcripts = { ...f.transcripts, [DEEP]: { sessionID: DEEP, title: "⎇ deeper", status: "available" as const, messages: deep } }
   const view = buildTreeView({ state, transcripts, currentSessionID: DEEP, expanded: new Set(), filter: "default" })
 
-  test("every fork point on the path is marked, once, and row ids stay unique", () => {
-    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "╰⎇fix-flaky-test", "T3", "│ ⚙", "│ ○", "╰⎇deeper", "T4", "│ ○", "┆⎇Fix flaky test", "┆⎇⎇ fix-flaky-test"])
+  test("the fork-of-fork nests: fix-flaky-test one level in, deeper two, gutters and ids consistent", () => {
+    expect(shape(view.rows)).toEqual(["T1", "⚙", "○", "T2", "○", "╰⎇fix-flaky-test", "T3", "│ ⚙", "│ ○", "│ ╰⎇deeper", "T4", "│ │ ○", "T4", "│ ○", "T3", "○"])
     expect(view.rows.filter((r) => r.kind === "branch" && r.isCurrent).map((r) => r.sessionID)).toEqual([DEEP])
-    // the middle branch is both a fork point on the path and a session that kept going
     expect(new Set(view.rows.map((r) => r.id)).size).toBe(view.rows.length)
+    // gutter connectors carry the topology: deeper's header rides the open fix-flaky-test spine
+    // (one │), and its own rows carry two │ levels
+    const deeper = view.rows.find((r) => r.kind === "branch" && r.sessionID === DEEP)!
+    expect(deeper.gutter).toBe("│ ╰⎇")
+    expect(view.rows.filter((r) => r.kind === "step" && r.sessionID === DEEP).every((r) => r.gutter === "│ │ ")).toBe(true)
+    // currentRowId is DEEP's tip (its last own row) — the route marks it `← here`
+    const deepTip = view.rows.filter((r) => r.kind !== "branch" && r.sessionID === DEEP).at(-1)!
+    expect(view.currentRowId).toBe(deepTip.id)
+  })
+})
+
+describe("the current session survives an unloaded on-path ancestor (P0)", () => {
+  const f = buildFixture()
+  const DEEP = "ses_deep"
+  const state = foldJournal(
+    [
+      { v: 1, id: "e1", ts: 1, type: "tree.created", actor: "tui", data: { rootSessionID: TRUNK } },
+      { v: 1, id: "e2", ts: 2, type: "branch.opened", actor: "tui", data: { sessionID: OPEN, parentSessionID: TRUNK, anchorMessageID: "a2", name: "fix-flaky-test", kind: "explicit" } },
+      { v: 1, id: "e3", ts: 3, type: "branch.opened", actor: "tui", data: { sessionID: DEEP, parentSessionID: OPEN, anchorMessageID: "oa1", name: "deeper", kind: "explicit" } },
+    ] satisfies JournalEntry[],
+    "t_deep_p0",
+  )
+  const deep = [...copyPrefix(f.transcripts[OPEN]!.messages.slice(0, 6), "d"), user("dm1", "deeper idea"), assistant("da1", { text: "Deep done.", input: 7000, output: 15 })]
+  const withDeep = { sessionID: DEEP, title: "⎇ deeper", status: "available" as const, messages: deep }
+  const base = { state, currentSessionID: DEEP, expanded: new Set<string>(), filter: "default" as const }
+  // fetchTranscript hands back this shape when a closed ancestor's one fetch failed (transcripts.ts)
+  const openDeleted = { sessionID: OPEN, title: "⎇ fix-flaky-test", status: "deleted" as const, messages: [] }
+
+  for (const [label, openTr] of [["absent", undefined], ["deleted/empty", openDeleted]] as const) {
+    test(`OPEN ${label}: DEEP's own rows and cursor still render, without replaying the prefix`, () => {
+      const transcripts = { [TRUNK]: f.transcripts[TRUNK]!, [DEEP]: withDeep, ...(openTr ? { [OPEN]: openTr } : {}) }
+      const view = buildTreeView({ ...base, transcripts })
+      const deepRows = view.rows.filter((r) => r.kind !== "branch" && r.sessionID === DEEP)
+      expect(deepRows.length).toBeGreaterThan(0)
+      expect(view.currentRowId).toBe(deepRows.at(-1)!.id)
+      // DEEP fills the gap the unloaded OPEN left with its own copies (T3/T4), never the trunk's T1/T2
+      expect(deepRows.filter((r) => r.kind === "turn").map((r) => (r.kind === "turn" ? r.turn : 0))).toEqual([3, 4])
+      // its rows still nest under the headers-only OPEN spine (two gutter levels)
+      expect(deepRows.every((r) => r.gutter.startsWith("│ │ "))).toBe(true)
+      // OPEN itself contributes only a placeholder header, no rows of its own
+      expect(view.rows.some((r) => r.kind !== "branch" && r.sessionID === OPEN)).toBe(false)
+    })
+  }
+
+  test("every transcript present is the control: same current tip", () => {
+    const view = buildTreeView({ ...base, transcripts: { ...f.transcripts, [DEEP]: withDeep } })
+    const deepTip = view.rows.filter((r) => r.kind !== "branch" && r.sessionID === DEEP).at(-1)!
+    expect(view.currentRowId).toBe(deepTip.id)
+  })
+})
+
+describe("an unresolvable anchor never replays the copied prefix (P2)", () => {
+  test("a branch whose anchor is absent from its loaded parent contributes an empty tail", () => {
+    const f = buildFixture()
+    const MID = "ses_mid"
+    const CUR = "ses_cur"
+    const state = foldJournal(
+      [
+        { v: 1, id: "e1", ts: 1, type: "tree.created", actor: "tui", data: { rootSessionID: TRUNK } },
+        // "ghost" is not a message in the trunk transcript, so MID's own tail cannot be located
+        { v: 1, id: "e2", ts: 2, type: "branch.opened", actor: "tui", data: { sessionID: MID, parentSessionID: TRUNK, anchorMessageID: "ghost", name: "mid", kind: "explicit" } },
+        { v: 1, id: "e3", ts: 3, type: "branch.opened", actor: "tui", data: { sessionID: CUR, parentSessionID: MID, anchorMessageID: "mm1", name: "cur", kind: "explicit" } },
+      ] satisfies JournalEntry[],
+      "t_p2",
+    )
+    const midMsgs = [...copyPrefix(f.transcripts[TRUNK]!.messages, "mid"), user("mm1", "mid idea"), assistant("ma1", { text: "mid done", input: 900, output: 9 })]
+    const curMsgs = [...copyPrefix(midMsgs.slice(0, 7), "c"), user("cm1", "cur idea"), assistant("ca1", { text: "cur done", input: 950, output: 9 })]
+    const transcripts = {
+      [TRUNK]: f.transcripts[TRUNK]!,
+      [MID]: { sessionID: MID, title: "mid", status: "available" as const, messages: midMsgs },
+      [CUR]: { sessionID: CUR, title: "cur", status: "available" as const, messages: curMsgs },
+    }
+    const view = buildTreeView({ state, transcripts, currentSessionID: CUR, expanded: new Set(), filter: "default" })
+    const mid = view.rows.find((r) => r.kind === "branch" && r.sessionID === MID)!
+    expect(mid.kind === "branch" && mid.turns).toBe(0)
+    // the bug sliced from 0, replaying MID's whole copied prefix as its own turns — it must not
+    expect(view.rows.some((r) => r.kind !== "branch" && r.sessionID === MID)).toBe(false)
+    // the current session hanging off it is still reached
+    expect(view.currentRowId).toBeDefined()
+    expect(view.rows.some((r) => r.kind !== "branch" && r.sessionID === CUR)).toBe(true)
+  })
+
+  test('a branch forked before the parent\'s first message (anchor "") still shows its whole tail', () => {
+    const TR = "ses_tr"
+    const B = "ses_pre"
+    const state = foldJournal(
+      [
+        { v: 1, id: "e1", ts: 1, type: "tree.created", actor: "tui", data: { rootSessionID: TR } },
+        { v: 1, id: "e2", ts: 2, type: "branch.opened", actor: "tui", data: { sessionID: B, parentSessionID: TR, anchorMessageID: "", name: "pre", kind: "explicit" } },
+      ] satisfies JournalEntry[],
+      "t_pre",
+    )
+    const transcripts = {
+      [TR]: { sessionID: TR, title: "tr", status: "available" as const, messages: [user("u1", "hi"), assistant("a1", { text: "yo", input: 10, output: 2 })] },
+      [B]: { sessionID: B, title: "pre", status: "available" as const, messages: [user("bu1", "branch q"), assistant("ba1", { text: "branch a", input: 10, output: 2 })] },
+    }
+    const view = buildTreeView({ state, transcripts, currentSessionID: TR, expanded: new Set([B]), filter: "default" })
+    const b = view.rows.find((r) => r.kind === "branch" && r.sessionID === B)!
+    // no shared prefix, so its whole transcript is legitimately its own tail (slice from 0 is right here)
+    expect(b.kind === "branch" && b.turns).toBe(1)
+    expect(view.rows.filter((r) => r.kind !== "branch" && r.sessionID === B).length).toBe(2)
   })
 })
 

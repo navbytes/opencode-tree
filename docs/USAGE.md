@@ -87,20 +87,25 @@ Palette: **Context tree**, **Branch here**, **Merge branch**, **Decisions**, **L
 ## Reading the screen
 
 ```
-┌ Context tree · Fix flaky test · ⎇ fix-flaky (open · haiku)   ctx ~46k/200k · filling
-│ Input  ▁▂▃▄▅▆▇█▮…      Model ▪▪▪…      Tools ▪▪▪…      [2] Turns
-│ turn  step                                    tokens
-│ T1  ● user      …                              1.2k  ┃ ⚙ bash · T1 · step 3
-│     ⚙ tool      bash ls -la → total…          ~2.1k  ┃ Payload {"command": …}
-│ T2  ● user      …                                    ┃ Result  total 744 …
-│  ├⎇ try-redis   ▸ squashed · 9 turns                 ┃ Timing  started … · 21 ms
-│  ╰⎇ fix-flaky   ▾ open · 6 turns · haiku             ┃ Crop    protected: latest-per-tool
-│  │  ● user …
-└ ⏎ go  b branch  m merge  c crop  x undo  ? help  q back
+┌ Context tree · Fix flaky test · trunk                        ctx ~46k/200k · filling
+│ filter: default 24 rows
+│ ● user: build yourself a tool that reads the context window…              ~1.2k
+│ ○ assistant: I'll start by inspecting my environment…                      0.3k
+│ ⚙ [bash $ ls -la ~/Documents/] → total 744 …                              ~2.1k
+│ ● user: decompress the session and show the structure                     ~0.2k
+│ ╰⎇ try-redis  ▸ squashed · 9 turns                                         ~22k
+│ ╰⎇ fix-flaky  ▾ open · 6 turns  ← here                                     ~14k
+│ │ ● user: the bun test is flaky, find the race                            ~0.4k
+│ │ ⚙ [bash $ bun test src/foo.test.ts] ⚠                                    ~4.7k
+│ ◆ Decision: try-redis · Outcome: switched to a write-through cache…        ~0.9k
+└ ⏎ go  b branch  m merge  c crop  i inspector  1·2·3 lanes  x undo  ? help  q back
 ```
 
-- Rows are the *active path*. Above the fork point they belong to the trunk (jumping there
-  forks the trunk); below, to your branch. `T<n>` counts turns along the path.
+- `/tree` is an outline of the *whole* tree: one content-forward row per message (`● user:` /
+  `○ assistant:`) and tool step (`⚙ [bash $ …]` / `[tool: arg] → out`). From anywhere you see the
+  whole tree — your branch open with `← here`, the rest folded to their `⎇` header (`→` opens one).
+- The Input/Model/Tools lanes and the right-hand inspector (DeepSeek-Harness trajectory) are OFF by
+  default so the first screen is the clean outline; `1/2/3` bring in the lanes, `i` the inspector.
 - The header's context string is the same one the prompt gauge shows, character for
   character. The lanes only appear once there are three turns to plot; a session with no
   messages says so instead of drawing an empty frame.

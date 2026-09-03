@@ -17,43 +17,55 @@ model, architecture, edge cases, and the roadmap.
 
 ## The idea in one screen
 
+`/tree` is an outline of the whole session tree — Pi's tree — where every message and tool step
+is one content-forward row and branches are drawn at their fork points:
+
 ```
-┌ Context tree · Fix flaky test · ⎇ fix-flaky-test (open)                    ctx ~46k/200k · filling ▲+24% (bash) ─┐
-│ Input  ▁▁▂▂▃▃▄▄▅▅▆▆▇▇█        Model ▪ ▪ ▪  ▪ ▪       Tools ▪▪▪ ▪▪ ▪▪▪▪ ▪▪      [1] Duration [2] Turns [3] Calls │
-│ turn  step                                    tokens ┬──────────────────────────────────────────────────────┤
-│ T1  ● user      Build yourself a tool that…     1.2k │ ⚙ bash · T1 · step 3                                   │
-│     ⚙ bash      ls -la ~/Documents/  → total…  ~2.1k │ Status   completed · 21 ms                             │
-│ T2  ● user      decompress the session and…     0.2k │ Payload  {"command":"ls -la …"}                        │
-│  ├⎇ try-redis      ▸ squashed · 9 turns        ~22k  │ Result   total 744 …                                   │
-│  ╰⎇ fix-flaky-test ▾ open · 6 turns   ← here   ~14k  │ Tokens   ~2.1k · 4.6% of context                       │
-│  │  ⚙ bash      bun test src/foo.test.ts ⚠     ~4.7k │ Crop     [c] stub result · [t] drop turn               │
-│ T3  ◆ decision  Decision: try-redis — Outcome…  0.9k │                                                        │
-├──────────────────────────────────────────────────────┴──────────────────────────────────────────────────────┤
-│ ⏎ go  b branch  m merge  c crop  x undo  ? help  q back                                                      │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Context tree · Fix flaky test · trunk                                  ctx ~46k/200k · filling
+│ filter: default 24 rows
+│ ● user: build yourself a tool that reads the context window…                              ~1.2k
+│ ○ assistant: I'll start by inspecting my environment…                                      0.3k
+│ ⚙ [bash $ ls -la ~/Documents/] → total 744 …                                              ~2.1k
+│ ● user: decompress the session and show the structure                                      ~0.2k
+│ ╰⎇ try-redis  ▸ squashed · 9 turns                                                          ~22k
+│ ╰⎇ fix-flaky  ▾ open · 6 turns  ← here                                                      ~14k
+│ │ ● user: the bun test is flaky, find the race                                             ~0.4k
+│ │ ⚙ [bash $ bun test src/foo.test.ts] ⚠                                                     ~4.7k
+│ ◆ Decision: try-redis · Outcome: switched to a write-through cache…                         ~0.9k
+└ ⏎ go  b branch  m merge  c crop  i inspector  1·2·3 lanes  x undo  ? help  q back
 ```
 
-Rows are trajectory steps of the active path; the gutter draws branches at their
-anchors (git-log style); the lanes on top are DeepSeek Harness's Input / Model /
-Tools timeline; the right pane is its inspector. Branches off the active path (siblings, the trunk's
-continuation) are listed below as `┆⎇` rows, and sessions made with OpenCode's own `/fork`
-are adopted into the tree automatically.
+Every message and tool call is a row; the gutter draws each branch at the message it was forked
+from; from anywhere you see the whole tree, your current branch open with `← here` and the rest
+folded. It stays close to Pi so the screen is familiar to anyone coming from it. The DeepSeek
+Harness *trajectory* is one keystroke away, not gone: `i` opens the inspector (per-step payload,
+result, timing) and `1/2/3` bring in the Input / Model / Tools lane minimap. Sessions made with
+OpenCode's own `/fork` are adopted into the tree automatically.
 
 ## Screenshots
 
-Real OpenCode 1.18 TUI, gemma4 via ollama. A trunk with a native `/fork` at turn 1, a squashed
-`try-redis` branch (its ◆ decision record landed in the trunk as T5), a discarded `try-lru`
-branch, and a second native fork:
+Real OpenCode 1.18 TUI, gemma4 via ollama. `/tree` opens as a Pi-style outline of the whole
+session tree: one content-forward row per message and tool step (`● user:` / `○ assistant:` /
+`⚙ [bash $ …]`), branches drawn at their fork points with `│ ├ ╰` connectors and folded to their
+`⎇` header until you open them. Here a trunk about caching a `/users` endpoint has a squashed
+`try-redis` branch (its ◆ decision record is the leaf), a rejected `try-lru`, and two native
+`/fork` sessions:
 
 ![tree from the trunk](docs/screenshots/tree-trunk.png)
 
-`→` expands branches inline; their turns continue the trunk's numbering from the fork point:
+The DeepSeek-Harness trajectory is one keystroke away, not gone: `i` opens the inspector and
+`1/2/3` bring in the Input/Model/Tools lanes:
 
-![tree with branches expanded](docs/screenshots/tree-expanded.png)
+![tree with the trajectory panels on](docs/screenshots/tree-trajectory.png)
 
-From inside a branch, `← here` marks it and the trunk's continuation and siblings appear as `┆⎇` rows:
+From inside a branch, `← here` marks your current step, that branch is expanded, and the rest of
+the tree stays visible and folded — you always see the whole tree:
 
 ![tree from a branch](docs/screenshots/tree-from-a-branch.png)
+
+`→` expands a branch inline (its turns continue the numbering from the fork point):
+
+![a branch expanded inline](docs/screenshots/tree-expanded.png)
 
 `D` decisions · `u` what's filling the context · `?` help · `m` merge · the sidebar card:
 

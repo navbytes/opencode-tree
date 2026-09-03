@@ -60,11 +60,6 @@ function truncate(text: string, max: number): string {
   return `${text.slice(0, max - 1)}…`
 }
 
-function firstLine(text: string): string {
-  const idx = text.indexOf("\n")
-  return idx === -1 ? text : text.slice(0, idx)
-}
-
 /** Best-effort "primary argument" of a tool call, mirroring core/crop.ts's `shortArg`. */
 function primaryArgOf(input: unknown): string {
   if (!input || typeof input !== "object") return ""
@@ -73,20 +68,35 @@ function primaryArgOf(input: unknown): string {
   return typeof candidate === "string" ? candidate : ""
 }
 
+/** The shell command of a bash/exec tool call, if any — drives the `[bash $ …]` form. */
+function commandOf(input: unknown): string {
+  if (!input || typeof input !== "object") return ""
+  const candidate = (input as Record<string, unknown>)["command"]
+  return typeof candidate === "string" ? candidate : ""
+}
+
 /**
- * One-line preview of a single part (DESIGN.md §7.2's row `preview` column):
- * - tool: `<tool> <primary-arg → 40 chars>  → <first line of output, 30 chars>`
+ * One-line, content-forward preview of a single part — the Pi outline × DSH trajectory row
+ * (DESIGN.md §7.1). The command/argument is the DSH "payload"; the output snippet is its
+ * "result":
+ * - tool with a shell command: `[bash $ <cmd>]` (the command is the payload)
+ * - other tools: `[<tool>: <arg>] → <output>` (or `[<tool>]` when there is no argument)
  * - text: first 60 chars, newlines flattened
  * - reasoning: literal `(thinking)`
  * - other (step-start/finish/snapshot/patch/retry, …): title or type, first 60 chars
+ *
+ * The `⚙`/`✗` glyph and error flag are added by the renderer, not here.
  */
 export function partPreview(part: StepPart): string {
   const kind = stepKind(part)
   if (kind === "tool") {
     const tool = part.tool ?? "tool"
+    const command = commandOf(part.state?.input)
+    if (command) return `[${tool} $ ${truncate(flatten(command), 52)}]`
     const arg = truncate(flatten(primaryArgOf(part.state?.input)), 40)
-    const output = truncate(flatten(firstLine(part.state?.output ?? "")), 30)
-    return arg ? `${tool} ${arg}  → ${output}` : `${tool}  → ${output}`
+    const head = arg ? `[${tool}: ${arg}]` : `[${tool}]`
+    const output = truncate(flatten(part.state?.output ?? ""), 30)
+    return output ? `${head} → ${output}` : head
   }
   if (kind === "reasoning") return "(thinking)"
   if (kind === "text") return truncate(flatten(part.text ?? ""), 60)

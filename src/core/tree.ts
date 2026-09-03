@@ -1,20 +1,19 @@
 /**
- * The combined tree + trajectory view model (DESIGN.md §7).
+ * The combined tree + trajectory view model (DESIGN.md §7) — a Pi-style whole-tree outline.
  *
- * `buildTreeView` walks the *spine* — root session → … → current session. Because
- * `session.fork` copies the prefix with **fresh message IDs**, a branch anchored on an
- * ancestor's message can only be placed by position, so each spine session contributes
- * the *segment* it owns: the root up to and including the first anchor, each child from
- * the message after its anchor up to and including the next anchor, and the current
- * session from after its anchor to its tip. Rows therefore carry their *owning*
- * session's message IDs (jumping into the prefix forks the ancestor, not the copy) and
- * `branch` rows attach right after the anchor message of the segment they fork from.
- * `anchorMessageID` is the **last message shared** with the parent (inclusive). Whatever the
- * path does not draw — branches anchored past the fork point, the ancestors' own tips — is
- * appended as an "elsewhere" group so it stays reachable. Each spine session's own fork
- * point is drawn as a `╰⎇` marker row (`isCurrent` on the session you are in), with its
- * segment under it like an expanded branch. A `git log --graph` gutter
- * (`├⎇` / `╰⎇` / `│ ` / `┆⎇` for elsewhere) draws the tree axis; row order is the time axis.
+ * `buildTreeView` does a depth-first walk of the *whole* tree of sessions, starting at the
+ * root (`state.root`, or the current session's furthest loaded ancestor). Each session
+ * contributes its own messages (a branch's tail after the copied prefix; `session.fork`
+ * copies that prefix with **fresh message IDs**, so the tail is found by *position* — the
+ * anchor's index in the parent applied to the branch). A branch hangs off the message it was
+ * forked from: right after that message we draw a `⎇ name` header and, when the branch is
+ * open, recurse into its tail one level deeper. Branches on the current path (its chain from
+ * the root) are open by default so you always see the trunk, where you are, and every sibling
+ * from anywhere; off-path branches fold to a single header (`▸`), expandable with `→`/`e`.
+ *
+ * A `git log --graph` gutter draws the tree axis: `│ ` for each open ancestor level and a
+ * `├⎇`/`╰⎇` join at each branch header; row order is the time axis. Rows carry their *owning*
+ * session's message IDs (jumping into the prefix forks the ancestor, not the copy).
  *
  * Pure, no OpenCode/opentui/solid-js imports — see test/core-purity.test.ts.
  */
@@ -81,9 +80,6 @@ export type BranchRow = {
   expanded: boolean
   isCurrent: boolean
   last: boolean
-  /** Synthetic row: an ancestor's *own* continuation past our fork point, not a branch
-   *  of it — it has no parent and no branch status to show. */
-  ancestor?: true
 }
 
 export type Row = TurnRow | StepRow | BranchRow
@@ -281,12 +277,16 @@ type Ctx = {
   filter: Filter
   labels: Record<string, string>
   crops: CropRef[]
+  /** anchorMessageID → the branches forked there, in journal order. */
   anchorMap: Map<string, BranchState[]>
-  spineSessions: Set<string>
-  /** `${parentSessionID}:${anchorMessageID}` → the spine session that forks off there. */
-  spineMarkers: Map<string, BranchState>
-  /** sessionIDs already drawn as a branch row, so the "elsewhere" group can skip them. */
-  placed: Set<string>
+  /** The current session and every ancestor up to the root; these are open by default. */
+  onPath: Set<string>
+  /** Each on-path session → the next session down the current path, so the DFS can keep
+   *  descending toward the current session even when an ancestor's transcript never loaded. */
+  onPathChild: Map<string, string>
+  /** Index in the current session's transcript where its own messages begin (its copied
+   *  prefix length), used to render its rows when its parent's transcript is missing. */
+  currentTailStart: number
 }
 
 function isCropped(ctx: Ctx, messageID: string, partID: string): boolean {
@@ -351,107 +351,104 @@ function emitAssistantRows(ctx: Ctx, sessionID: string, message: TranscriptMessa
   }
 }
 
-/** A branch as far as a row cares. An ancestor's own continuation past the fork point is
- *  drawn as a synthetic one (parent = itself), so both paths share this code. */
-type BranchLike = Pick<BranchState, "sessionID" | "parentSessionID" | "anchorMessageID"> &
-  Partial<Pick<BranchState, "name" | "status" | "note" | "model" | "forgotten">> & { ancestor?: true }
+/** A branch is open in the outline when the user has toggled it: on-path branches start open
+ *  (so the root→you path is always visible), so `expanded` membership *collapses* them;
+ *  off-path branches start folded, so membership *opens* them. The BranchRow's `expanded`
+ *  field carries this resolved state, so the route can fold/unfold with one toggle either way. */
+function shownExpanded(ctx: Ctx, sessionID: string): boolean {
+  const flagged = ctx.expanded.has(sessionID)
+  return ctx.onPath.has(sessionID) ? !flagged : flagged
+}
 
-function pushBranch(ctx: Ctx, branch: BranchLike, o: { depth: number; gutter: string; last: boolean; spine?: boolean }, out: Row[]): void {
+/** Emit a branch header for `branch` (unless a filter hides branch rows) and, when it is open,
+ *  recurse into the branch's own messages — its tail after the copied prefix, found by the
+ *  anchor's *position* in the parent (fork copies the prefix with fresh IDs). */
+function pushBranch(ctx: Ctx, branch: BranchState, depth: number, gutter: string, last: boolean, showHeader: boolean, out: Row[]): void {
   const branchTranscript = ctx.transcripts[branch.sessionID]
   const parentTranscript = ctx.transcripts[branch.parentSessionID]
   const anchorIndex = parentTranscript?.messages.findIndex((m) => m.id === branch.anchorMessageID) ?? -1
-  // the branch's own messages start after the copied prefix (anchor inclusive)
-  const tail = branchTranscript ? branchTranscript.messages.slice(anchorIndex + 1) : []
-  // a spine marker is always "expanded": the walk that emitted it renders its rows next
-  const expanded = o.spine === true || ctx.expanded.has(branch.sessionID)
-  ctx.placed.add(branch.sessionID)
+  const isCurrent = branch.sessionID === ctx.currentSessionID
+  // Offset where the branch's own tail begins in its transcript — the anchor's position in the
+  // parent, since fork copies the prefix by position. When the anchor can't be resolved we never
+  // slice from 0, which would replay the whole copied prefix as fresh rows (duplicate turns):
+  //   · anchor "" — forked before the parent's first message, so it shares nothing: whole tail.
+  //   · the current session — its live transcript is here; slice at the prefix the loaded
+  //     ancestors account for, so its rows still render when an on-path ancestor never loaded.
+  //   · otherwise — a real anchor we cannot place: tail unknown, so empty.
+  const tailStart = anchorIndex >= 0 ? anchorIndex + 1 : branch.anchorMessageID === "" ? 0 : isCurrent ? ctx.currentTailStart : -1
+  const tail = branchTranscript && tailStart >= 0 ? branchTranscript.messages.slice(tailStart) : []
+  const expanded = shownExpanded(ctx, branch.sessionID)
 
-  out.push({
-    kind: "branch",
-    // an ancestor's tail is a different row from that same session's fork-point marker
-    id: `branch:${branch.sessionID}${branch.ancestor ? ":tail" : ""}`,
-    sessionID: branch.sessionID,
-    parentSessionID: branch.parentSessionID,
-    anchorMessageID: branch.anchorMessageID,
-    depth: o.depth,
-    gutter: o.gutter,
-    // adopted native forks carry no name: fall back to the session's live title
-    name: branch.name ?? branchTranscript?.title ?? branch.sessionID,
-    status: branch.forgotten ? "deleted" : (branch.status ?? "open"),
-    note: branch.note,
-    turns: countTurns(ctx.filter, tail),
-    tokens: aggregateTokens(tail),
-    model: branch.model,
-    expanded,
-    // true only on the spine marker of the session you are in (rendered as `← here`)
-    isCurrent: branch.sessionID === ctx.currentSessionID,
-    last: o.last,
-    ...(branch.ancestor ? { ancestor: branch.ancestor } : {}),
-  })
-
-  if (!o.spine && expanded && branchTranscript) {
-    // continue the parent's turn numbering: the branch's first turn follows the anchor's turn
-    const turnAtAnchor = parentTranscript ? countTurns(ctx.filter, parentTranscript.messages.slice(0, anchorIndex + 1)) : 0
-    renderMessages(ctx, branch.sessionID, tail, o.depth + 1, "│ ", out, { turn: turnAtAnchor })
+  if (showHeader) {
+    out.push({
+      kind: "branch",
+      id: `branch:${branch.sessionID}`,
+      sessionID: branch.sessionID,
+      parentSessionID: branch.parentSessionID,
+      anchorMessageID: branch.anchorMessageID,
+      depth,
+      gutter: `${gutter}${last ? "╰⎇" : "├⎇"}`,
+      // adopted native forks carry no name: fall back to the session's live title
+      name: branch.name ?? branchTranscript?.title ?? branch.sessionID,
+      status: branch.forgotten ? "deleted" : (branch.status ?? "open"),
+      note: branch.note,
+      turns: countTurns(ctx.filter, tail),
+      tokens: aggregateTokens(tail),
+      model: branch.model,
+      expanded,
+      isCurrent,
+      last,
+    })
   }
+
+  if (!expanded) return
+
+  // hidden headers (user-only/labeled) keep the current path flat, one level per open branch
+  const childDepth = showHeader ? depth + 1 : depth
+  const childGutter = showHeader ? `${gutter}│ ` : gutter
+  if (branchTranscript && tailStart >= 0) {
+    // continue the parent's turn numbering: the branch's first turn follows the anchor's turn
+    const turnAtAnchor =
+      anchorIndex >= 0 && parentTranscript
+        ? countTurns(ctx.filter, parentTranscript.messages.slice(0, anchorIndex + 1))
+        : countTurns(ctx.filter, branchTranscript.messages.slice(0, tailStart))
+    walkSession(ctx, branch.sessionID, tail, childDepth, childGutter, turnAtAnchor, out)
+  }
+  // With no rows of its own an on-path ancestor still must hand off to its on-path child, so the
+  // DFS reaches the current session when an intermediate ancestor's transcript never loaded.
+  descendOnPath(ctx, branch.sessionID, tail, childDepth, childGutter, out)
 }
 
-function emitBranches(ctx: Ctx, sessionID: string, anchorMessageID: string, depth: number, out: Row[]): void {
-  if (!branchAllowed(ctx.filter)) return
-  const candidates = (ctx.anchorMap.get(anchorMessageID) ?? []).filter(
-    (b) => b.parentSessionID === sessionID && !ctx.spineSessions.has(b.sessionID),
-  )
-  // the path we are on forks here too; it is drawn last, below its siblings (DESIGN.md §7.2)
-  const marker = ctx.spineMarkers.get(`${sessionID}:${anchorMessageID}`)
+/** Keep the DFS descending the on-path chain even when a session's transcript is missing or
+ *  empty: draw `sessionID`'s on-path child (known from the journal, no transcript needed) unless
+ *  the walk over `walked` already drew it. Off-path sessions have no on-path child — a no-op. */
+function descendOnPath(ctx: Ctx, sessionID: string, walked: TranscriptMessage[], depth: number, gutter: string, out: Row[]): void {
+  const childID = ctx.onPathChild.get(sessionID)
+  const child = childID ? ctx.state.sessions[childID] : undefined
+  if (!child || walked.some((m) => m.id === child.anchorMessageID)) return
+  pushBranch(ctx, child, depth, gutter, true, branchAllowed(ctx.filter), out)
+}
 
-  candidates.forEach((branch, i) => {
-    const last = !marker && i === candidates.length - 1
-    pushBranch(ctx, branch, { depth, gutter: last ? "╰⎇" : "├⎇", last }, out)
+/** The branches forked at `anchorMessageID` of `sessionID`, drawn just below that message.
+ *  When a filter hides branch rows, only the current path recurses (off-path branches drop). */
+function emitChildBranches(ctx: Ctx, sessionID: string, anchorMessageID: string, depth: number, gutter: string, out: Row[]): void {
+  const children = (ctx.anchorMap.get(anchorMessageID) ?? []).filter((b) => b.parentSessionID === sessionID)
+  if (children.length === 0) return
+  const showHeaders = branchAllowed(ctx.filter)
+  const visible = showHeaders ? children : children.filter((b) => ctx.onPath.has(b.sessionID))
+  visible.forEach((branch, i) => {
+    pushBranch(ctx, branch, depth, gutter, i === visible.length - 1, showHeaders, out)
   })
-  if (marker) pushBranch(ctx, marker, { depth, gutter: "╰⎇", last: true, spine: true }, out)
 }
-
-/** Gutter of the "elsewhere" group: a dashed trunk, i.e. off the rendered path. */
-const ELSEWHERE_GUTTER = "┆⎇"
 
 /**
- * Everything else in the tree, appended below the path (DESIGN.md §6.2's "the old
- * branch is untouched and stays visible"): branches whose anchor is not inside any
- * rendered segment — siblings forked further down an ancestor — and each ancestor's
- * own continuation past the point we forked away from it. Without these, forking from
- * the middle of the trunk hides both the trunk tip and every later branch.
+ * Depth-first over one session: emit its own `messages` (the tail after any copied prefix)
+ * as rows at `depth`/`gutter`, and after each message recurse into the branches anchored on
+ * it. `turnStart` seeds the turn counter (a branch continues its parent's numbering).
  */
-function emitElsewhere(ctx: Ctx, ancestorTails: BranchLike[], out: Row[]): void {
-  if (!branchAllowed(ctx.filter)) return
-
-  const rows: Row[] = []
-  for (const tail of ancestorTails) pushBranch(ctx, tail, { depth: 0, gutter: ELSEWHERE_GUTTER, last: false }, rows)
-  for (const sessionID of Object.keys(ctx.state.sessions)) {
-    if (ctx.placed.has(sessionID) || ctx.spineSessions.has(sessionID)) continue
-    pushBranch(ctx, ctx.state.sessions[sessionID]!, { depth: 0, gutter: ELSEWHERE_GUTTER, last: false }, rows)
-  }
-  if (rows.length === 0) return
-
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const row = rows[i]!
-    if (row.kind !== "branch") continue
-    row.last = true
-    break
-  }
-  out.push(...rows)
-}
-
-function renderMessages(
-  ctx: Ctx,
-  sessionID: string,
-  messages: TranscriptMessage[],
-  depth: number,
-  gutter: string,
-  out: Row[],
-  counter: { turn: number } = { turn: 0 },
-  lastUserIndexOverride?: number,
-): void {
-  const lastUserIndex = lastUserIndexOverride ?? findLastUserIndex(messages, ctx.filter)
+function walkSession(ctx: Ctx, sessionID: string, messages: TranscriptMessage[], depth: number, gutter: string, turnStart: number, out: Row[]): void {
+  const lastUserIndex = findLastUserIndex(messages, ctx.filter)
+  const counter = { turn: turnStart }
   // set by a hidden plugin command turn, so the acknowledgement that follows it goes too
   let inPluginCommand = false
   messages.forEach((message, i) => {
@@ -489,7 +486,7 @@ function renderMessages(
     }
     // Branches attach right after their anchor — the last message they share with
     // this session — whichever role that message has.
-    emitBranches(ctx, sessionID, message.id, depth, out)
+    emitChildBranches(ctx, sessionID, message.id, depth, gutter, out)
   })
 }
 
@@ -583,20 +580,40 @@ function computeTotalTokens(transcript: Transcript): { tokens: number; estimated
 // Entry point.
 // ---------------------------------------------------------------------------
 
-export function buildTreeView(o: BuildOptions): TreeView {
-  const transcript = o.transcripts[o.currentSessionID]
-  if (!transcript) return { rows: [], indexById: {}, currentRowId: undefined, totalTokens: 0, totalEstimated: false }
+/** The current session and every ancestor from the root down to it — the path drawn open by
+ *  default. Exported so the route can seed its fold state / know what is "on the path". */
+export function currentChainOf(state: TreeState, currentSessionID: string): string[] {
+  return [...ancestorChainOf(state, currentSessionID), currentSessionID]
+}
 
-  const ancestorChain = ancestorChainOf(o.state, o.currentSessionID)
-  const spine = [...ancestorChain, o.currentSessionID]
-  const spineSessions = new Set(spine)
-  // every spine session but the root forks off the one above it: that fork point gets a
-  // marker row, so a session with no messages of its own still shows where it started
-  const spineMarkers = new Map<string, BranchState>()
-  for (const sessionID of spine.slice(1)) {
-    const branch = o.state.sessions[sessionID]
-    if (branch) spineMarkers.set(`${branch.parentSessionID}:${branch.anchorMessageID}`, branch)
+/** How many messages of the current session's transcript are copied prefix: the summed length
+ *  every *loaded* on-path ancestor contributes (an unloaded ancestor adds nothing, so its share
+ *  falls to the current session). Mirrors buildSpineMap's `from`, so the render and the
+ *  crop/spine translation slice the current transcript at the same point. */
+function prefixLengthOf(state: TreeState, transcripts: Record<string, Transcript>, chain: string[]): number {
+  let from = 0
+  for (let s = 0; s < chain.length - 1; s++) {
+    const own = transcripts[chain[s]!]
+    const child = state.sessions[chain[s + 1]!]
+    const anchorIndex = own && child ? own.messages.findIndex((m) => m.id === child.anchorMessageID) : -1
+    if (anchorIndex >= 0) from = anchorIndex + 1
   }
+  return from
+}
+
+export function buildTreeView(o: BuildOptions): TreeView {
+  const currentTranscript = o.transcripts[o.currentSessionID]
+  const chain = currentChainOf(o.state, o.currentSessionID)
+
+  // Render from the tree's declared root when its transcript is loaded, else the furthest
+  // loaded ancestor of the current session, else the current session itself. The DFS below
+  // then reaches every branch and sibling from there, so nothing is "elsewhere".
+  let root = o.currentSessionID
+  if (o.state.root && o.transcripts[o.state.root]) root = o.state.root
+  else for (const s of chain) if (o.transcripts[s]) { root = s; break }
+
+  const rootTranscript = o.transcripts[root]
+  if (!rootTranscript) return { rows: [], indexById: {}, currentRowId: undefined, totalTokens: 0, totalEstimated: false }
 
   const ctx: Ctx = {
     state: o.state,
@@ -607,56 +624,23 @@ export function buildTreeView(o: BuildOptions): TreeView {
     labels: o.labels ?? {},
     crops: o.crops ?? [],
     anchorMap: buildAnchorMap(o.state),
-    spineSessions,
-    spineMarkers,
-    placed: new Set<string>(),
+    onPath: new Set(chain),
+    onPathChild: new Map(chain.slice(0, -1).map((s, i) => [s, chain[i + 1]!])),
+    currentTailStart: prefixLengthOf(o.state, o.transcripts, chain),
   }
 
   const allRows: Row[] = []
-  const counter = { turn: 0 }
-  // ancestors we fork away from, with the anchor we left them at (see emitElsewhere)
-  const ancestorTails: BranchLike[] = []
-  // branches forked before the first message anchor on "" and sit above everything
-  emitBranches(ctx, ancestorChain[0] ?? o.currentSessionID, "", 0, allRows)
-  // Spine segments (see header comment). A missing ancestor transcript degrades to
-  // rendering the current session's own copy of that prefix.
-  let from = 0 // index into the *current* session's transcript where the next segment starts
-  let depth = 0
-  let gutter = ""
-  for (let s = 0; s < spine.length; s++) {
-    const sessionID = spine[s]!
-    const own = o.transcripts[sessionID]
-    const child = spine[s + 1]
-    const childBranch = child ? o.state.sessions[child] : undefined
-    if (s < spine.length - 1) {
-      const anchorIndex = own ? own.messages.findIndex((m) => m.id === childBranch?.anchorMessageID) : -1
-      if (own && anchorIndex !== -1) {
-        // this ancestor owns messages [from .. anchorIndex]
-        const segment = own.messages.slice(from, anchorIndex + 1)
-        renderMessages(ctx, sessionID, segment, depth, gutter, allRows, counter, -1)
-        if (anchorIndex < own.messages.length - 1) {
-          ancestorTails.push({ sessionID, parentSessionID: sessionID, anchorMessageID: childBranch!.anchorMessageID, ancestor: true })
-        }
-        from = anchorIndex + 1
-        // the marker row for the child was just emitted at the anchor: the rest of the path
-        // is drawn under it, like an expanded branch
-        if (branchAllowed(o.filter)) {
-          depth += 1
-          gutter = "│ "
-        }
-        continue
-      }
-      // unknown anchor: let the next segment render from where we are, out of the copy
-      continue
-    }
-    const segment = transcript.messages.slice(from)
-    const lastUser = findLastUserIndex(segment, o.filter)
-    renderMessages(ctx, sessionID, segment, depth, gutter, allRows, counter, lastUser)
-  }
-  emitElsewhere(ctx, ancestorTails, allRows)
+  // branches forked before the first message (anchor "") sit above the root's messages
+  emitChildBranches(ctx, root, "", 0, "", allRows)
+  walkSession(ctx, root, rootTranscript.messages, 0, "", 0, allRows)
+  // if the render root's on-path child wasn't drawn among its messages (its anchor isn't in the
+  // loaded root transcript), descend anyway so the path to the current session is never cut
+  descendOnPath(ctx, root, rootTranscript.messages, 0, "", allRows)
 
   const rows = o.search ? applySearch(allRows, o.search) : allRows
 
+  // the current session's tip: its last message row, or — for a fork with no messages of its
+  // own yet — its own branch header
   let currentRowId: string | undefined
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i]!
@@ -665,7 +649,6 @@ export function buildTreeView(o: BuildOptions): TreeView {
       break
     }
   }
-  // a fork with no messages of its own has nothing but its marker row
   if (!currentRowId) currentRowId = rows.find((r) => r.kind === "branch" && r.isCurrent)?.id
 
   const indexById: Record<string, number> = {}
@@ -673,7 +656,7 @@ export function buildTreeView(o: BuildOptions): TreeView {
     indexById[r.id] = i
   })
 
-  const total = computeTotalTokens(transcript)
+  const total = currentTranscript ? computeTotalTokens(currentTranscript) : { tokens: 0, estimated: false }
   return { rows, indexById, currentRowId, totalTokens: total.tokens, totalEstimated: total.estimated }
 }
 
