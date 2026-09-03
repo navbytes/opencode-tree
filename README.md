@@ -6,7 +6,7 @@ Pi-style context tree for [OpenCode](https://opencode.ai), with the
 (timeline lanes, per-step tokens — the model's own where it reports them, estimated `~`
 elsewhere — timing, inspector) in one screen.
 
-**Status: 0.1.0 release candidate — not yet published to npm; install from a checkout (see `docs/USAGE.md`).**
+**Status: 0.1.0 — first release. Install with `"plugin": ["opencode-context-tree"]` in both `opencode.json` and `tui.json` (see `docs/USAGE.md`).**
 Branch, jump, labels, filters, search, crop + undo, squash/discard/tournament merge with a
 `$EDITOR` gate, the timeline lanes, inspector and consumers views, the gauge, and the headless
 `/ctree` commands all work against OpenCode 1.18 and are covered by pty-driven e2e tests
