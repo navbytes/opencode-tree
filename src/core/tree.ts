@@ -18,10 +18,10 @@
  * Pure, no OpenCode/opentui/solid-js imports — see test/core-purity.test.ts.
  */
 import type { BranchState, TreeState } from "./journal.js"
-import { estimateTokens } from "./tokens.js"
+import { estimateTokens, formatK } from "./tokens.js"
 import { messagePreview, partPreview, stepKind, type StepPart, type Transcript, type TranscriptMessage } from "./transcript.js"
 
-export type Filter = "default" | "no-tools" | "user-only" | "labeled" | "all"
+export type Filter = "default" | "no-tools" | "tools-only" | "user-only" | "labeled" | "all"
 
 export type TurnRow = {
   kind: "turn"
@@ -227,6 +227,56 @@ function tokenFieldsOf(message: TranscriptMessage): StepRow["tokenFields"] {
   return { input: tk.input ?? 0, output: tk.output, reasoning: tk.reasoning ?? 0, cacheRead: tk.cache?.read ?? 0, cacheWrite: tk.cache?.write ?? 0 }
 }
 
+/** What the provider actually charged as *prompt* at a row — the context that was really
+ *  sent at that point, system prompt and tool definitions included, because that is what
+ *  `tokens.input` covers (DESIGN.md §6.7). */
+export type PromptAtRow =
+  | { kind: "none" }
+  /** Nothing has been sent for this row yet: the trailing turn, or a reply still in flight. */
+  | { kind: "pending" }
+  | { kind: "prompt"; prompt: number; cached: number }
+
+/**
+ * The prompt figure that applies to one row, for the status line under the context gauge.
+ *
+ * - an **assistant step** carries its own message's report on every one of its rows;
+ * - a **user turn** takes the first assistant message after it — the reply *to* it, whose
+ *   prompt is the first one that included this message;
+ * - a **branch header** has none (its own column is already a subtree total).
+ *
+ * `prompt` sums `input + cache.read + cache.write` exactly as `contextSizeOf` does, so the
+ * figure is directly comparable with the `ctx …` gauge above it rather than a second
+ * convention.
+ */
+export function promptAtRow(row: Row, transcripts: Record<string, Transcript>): PromptAtRow {
+  if (row.kind === "branch" || row.kind === "separator") return { kind: "none" }
+  const of = (fields: StepRow["tokenFields"]): PromptAtRow =>
+    fields ? { kind: "prompt", prompt: fields.input + fields.cacheRead + fields.cacheWrite, cached: fields.cacheRead } : { kind: "pending" }
+  if (row.kind === "step") return of(row.tokenFields)
+
+  const messages = transcripts[row.sessionID]?.messages
+  if (!messages) return { kind: "none" }
+  const idx = messages.findIndex((m) => m.id === row.messageID)
+  if (idx === -1) return { kind: "none" }
+  // the first reply after this turn; if it is still streaming it has no report yet, and
+  // "pending" is the honest answer rather than a later turn's larger prompt
+  for (let i = idx + 1; i < messages.length; i++) {
+    if (messages[i]!.role === "assistant") return of(tokenFieldsOf(messages[i]!))
+  }
+  return { kind: "pending" }
+}
+
+/** `T2 reply · prompt 43.7k · 30.1k cached`, or `T3 · not sent yet`. Empty when there is
+ *  nothing to say, so the caller can drop the field rather than print a placeholder. */
+export function formatPromptAt(at: PromptAtRow, o: { turn?: number; what?: string } = {}): string {
+  if (at.kind === "none") return ""
+  const head = [o.turn === undefined ? "" : `T${o.turn}`, at.kind === "pending" ? "" : (o.what ?? "")].filter(Boolean).join(" ")
+  const lead = head ? `${head} · ` : ""
+  if (at.kind === "pending") return `${lead}not sent yet`
+  // a permanent "0 cached" on a provider that never caches is noise, as in formatContext
+  return `${lead}prompt ${formatK(at.prompt)}${at.cached > 0 ? ` · ${formatK(at.cached)} cached` : ""}`
+}
+
 export function aggregateTokens(messages: TranscriptMessage[]): number {
   let total = 0
   for (const m of messages) {
@@ -283,12 +333,15 @@ function stepAllowed(filter: Filter, kind: "text" | "tool" | "reasoning" | "othe
       return kind !== "other"
     case "no-tools":
       return kind !== "other" && kind !== "tool"
+    case "tools-only":
+      return kind === "tool"
     case "all":
       return true
   }
 }
 
 function turnAllowed(filter: Filter, label: string | undefined): boolean {
+  if (filter === "tools-only") return false
   return filter === "labeled" ? Boolean(label) : true
 }
 

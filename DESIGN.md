@@ -255,7 +255,7 @@ built-in `tui.json` keybinds table only covers OpenCode's own action names):
 - inside the route: `↑↓`/`j k` move · `g G` top/bottom · `shift+↑↓`/`J K` jump 20 ·
   `←→`/`h l` fold/unfold branch · `⏎` go here · `b` branch · `m` merge · `c` crop mark ·
   `t` result⇄turn · `a` auto-mark · `x` undo · `i` inspector · `u` consumers ·
-  `D` decisions · `L` label · `/` search · `f` filter cycle · `1 2 3` lane mode ·
+  `D` decisions · `L` label · `/` search · `f` filter cycle · `1 2` lane x-axis ·
   `y` copy · `e` expand branch inline · `q`/`esc` back.
 
 ---
@@ -447,6 +447,24 @@ auto-compaction is the *lossy* event the user wants to pre-empt with `/crop` or
 `/merge`. `sidebar_content` slot: `⎇ fix-flaky-test · open · parent "Fix flaky test"`,
 active crops, decisions on path, `[/tree]`.
 
+
+**The cursor's own prompt figure.** The tree's status line carries, right-aligned directly under
+the header gauge, what the provider was really sent at the row you are on:
+`T2 reply · prompt 43.7k · 30.1k cached`. It sums `input + cache.read + cache.write` exactly as
+`contextSizeOf` does, so the two numbers stack in one column and are read against each other —
+the gauge is now, this is the cursor, the gap is everything after that point. Because it is
+`tokens.input`, it inherently includes the system prompt and the tool definitions, which the
+per-row token column (a marginal, chars/4 estimate) never does.
+
+`core/tree.ts#promptAtRow` resolves it: an assistant step carries its own message's report on
+every one of its rows; a user turn takes the first assistant message after it, the reply whose
+prompt was the first to include that turn; a branch header has none, its column already being a
+subtree total. Nothing sent yet — a trailing turn, a reply in flight — reads `not sent yet`
+rather than a zero. It is deliberately **not** a second per-row column: it is history (an older
+row's figure is what went out then, not what a later crop would send now), and one number the
+user is deliberately inspecting can carry that caveat where forty scrolling ones cannot. Dropped
+whole, not wrapped, when the terminal is too narrow (§7.6).
+
 ### 6.8 Compaction interplay
 
 - The transform hook runs during compaction too, so cropped results are already
@@ -471,9 +489,9 @@ records as user messages, and can use the headless `/ctree` commands.
 
 ### 7.1 Can they be combined? Yes — they are two axes of one thing
 
-> **Revised after the 0.1.1 UX review.** The lanes are an *event strip*, as in DSH: one pill per
-> event on one shared axis across Input / Model / Tools, one cell of gap between neighbours (two at
-> a turn boundary in Turns mode), width proportional to duration in Duration mode, categorical
+> **Revised after the 0.1.1 UX review.** The lanes are an *event strip*: one pill per
+> event on one shared axis across Input / Model / Tools, one cell of gap between neighbours (three at
+> a turn boundary, holding the `│` rule), width proportional to duration in Duration mode, categorical
 > colours (input green / context grey, model purple, tools orange, error red), the selected step
 > inverted. Nothing is scaled by token count — height-as-magnitude produced flat or solid lanes on
 > real sessions; tokens live in the row column. When the strip does not fit, the newest events are
@@ -486,6 +504,15 @@ records as user messages, and can use the headless `/ctree` commands.
 > cells would merge and the pills would stop being countable events. When the layout overflows,
 > a one-line overview track under the lanes shows the window's position and red ticks at failed
 > tool calls, so global orientation survives without giving up pill fidelity.
+
+**On the DSH comparison.** The three-lane split is ours. DSH's own `ui-trajectory` README
+describes a *single* combined Overview ("A fixed Overview above the ledger projects real record
+start/duration timing from left to right; Assistant spans divide recorded TTFT from decoding")
+above a vertical ledger of User/Assistant/Tool/Subtool records; a hands-on review describes
+"input, model and tool lanes across the top", so the secondhand sources conflict and the
+original research here (Appendix A) was a screenshot and write-ups, not the source. What we do
+take from DSH directly is the event-pill idea, the always-available duration axis, and the turn
+rule (§7.3).
 
 DSH's Trajectory tab and Pi's `/tree` both render the *same* append-only event
 stream. DSH orders it by **time** and annotates each step with **cost and duration**
@@ -542,15 +569,37 @@ squashed and its ◆ record is T3 on the trunk; `fix-flaky-test` is where you ar
 is expanded under its anchor; the `bun test` result is 4.7k and flagged as a crop
 candidate; the inspector shows the selected `ls -la` call with DSH's five facets.
 
-### 7.3 Modes (the `Duration | Turns | Calls` toggle)
+### 7.3 The lane x-axis (`1` / `2`), and why there is no "Calls" mode
 
-They change the *x-scale of the minimap* and the *grouping of rows*:
+> **Revised (0.2.3).** There were three modes — `Duration | Turns | Calls` — and Turns and Calls
+> drew the *same events in the same lanes*, differing only by one blank cell at each turn
+> boundary. Checking DSH settled it: its Trajectory Overview has **no mode toggle at all**. It
+> is always duration-proportional ("projects real record start/duration timing from left to
+> right"), marks turns with **rules** ("Thick rules mark Turn boundaries, compact inline markers
+> identify Steps"), and reaches "just the tool calls" through zoom, drag-to-focus and search
+> rather than a mode.
 
-| Mode | Minimap x-axis | Rows |
-|---|---|---|
-| **Turns** (default) | one column per user turn | one row per step, grouped under `T<n>` markers (what the mockup shows) |
-| **Calls** | one column per tool call | tool rows only (assistant text folded into the turn header) — the "what did I run" view, also the natural crop view |
-| **Duration** | proportional to wall-clock (`time.start`/`end`) | rows carry `+12.3s` gaps; long gaps (user thinking, permission waits) are drawn as `┆ 4m idle` separators |
+So the toggle now carries only what it can honestly carry — the **x-scale** — and the two other
+jobs move to the mechanisms that already existed:
+
+| | What it is |
+|---|---|
+| **`1` Duration** | cells proportional to wall clock (`time.start`/`end`), so a 3-minute `bash` is visibly wider than a 0.2 s `read`. DSH's only axis. |
+| **`2` Turns** (default) | one cell per event: an event *count* axis, where a busy turn is wide because it did a lot, not because it took long. |
+| **turn boundaries** | drawn as a `│` rule across all three lanes, in **both** modes — DSH's thick rule. Never a mode of its own, and never just a wider gap you have to measure. |
+| **which events** | the row `Filter` (`f`, §7.5), not a mode. `tools-only` is the "what did I run" view and thins the rows *and* the lanes together; `no-tools` is its mirror; `user-only` leaves the prompts. |
+
+`core/lanes.ts#eventAllowed` is that coupling, with two deliberate mismatches against the rows'
+`stepAllowed`: `labeled` is an annotation on a row rather than a property of an event, so the
+lanes read it as no filter; and reasoning stays on the Model lane under every filter, because
+folding thinking into its assistant row is a *reading* convenience while the strip is a
+timeline — a minute of thinking is a thing that happened.
+
+What this deletes: the `calls` `LaneMode`, the `3` keybind, and the whole original
+magnitude-column model (`buildLanes`, `sparkline`, `fitColumns`, `durationWeighted`,
+`columnFor`) plus `buildEventStrip`, which the windowed layout superseded in 0.2.2. None of it
+was reachable from the route; it survived only because its tests kept passing, which is exactly
+how the Turns/Calls bug shipped.
 
 ### 7.4 Secondary views (`u`, `D`, crop mode) — from `pi-context-tree`
 

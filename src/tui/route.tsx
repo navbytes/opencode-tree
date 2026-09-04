@@ -10,7 +10,7 @@ import { abandonedTail, planJump, type AbandonedTail, type JumpPlan } from "../c
 import { foldJournal, type TreeState } from "../core/journal.js"
 import { firstIndex, lastIndex, moveSelection, nextBranchIndex, resolveSelection, toggleExpanded } from "../core/navigation.js"
 import { contextSizeOf, formatContext, formatK, type MinimalMessage } from "../core/tokens.js"
-import { buildSpineMap, buildTreeView, currentChainOf, type Filter, type Row, type StepRow, type TurnRow } from "../core/tree.js"
+import { buildSpineMap, buildTreeView, currentChainOf, formatPromptAt, promptAtRow, type Filter, type Row, type StepRow, type TurnRow } from "../core/tree.js"
 import { ContextGauge } from "./gauge.js"
 import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
@@ -172,7 +172,6 @@ const DEFAULT_KEYS: Record<string, string[]> = {
   copy: ["y"],
   mode_duration: ["1"],
   mode_turns: ["2"],
-  mode_calls: ["3"],
   lanes_off: ["0"],
   decisions: ["shift+d"],
   export: ["shift+e"],
@@ -205,21 +204,24 @@ const HELP = [
   "  b branch · m merge · c crop mode (space mark · a auto · t result⇄turn · ⏎ apply · esc leave)",
   "  u undo (alias x) · L label · y copy · E export decisions",
   "Views",
-  "  i inspector · 1 2 3 lanes (duration/turns/calls) · 0 off · s consumers · D decisions · f F filter",
+  "  i inspector · 1 2 lanes (duration/turns x-axis) · 0 off · s consumers · D decisions · f F filter",
   "Legend",
   "  ● user · ○ assistant · ⚙ tool step · ◆ decision · ≣ summary · ⎇ branch (a real OpenCode session)",
   "  │ ├ ╰ draw the topology · ▾ open ▸ folded · ← here is the session you are in",
   "  dim rows are not sent to the model; ── not in this branch's context ── is where your path forked",
   "  right column is tokens; ~ estimated · ⚠ ≥10k · ✂ cropped · ✗ tool error",
+  "  status-line right: the prompt really sent at the cursor · history, not re-costed after a crop",
   "  ⎇ colours: open green · squashed blue · rejected/discarded red · abandoned grey",
   "  lanes: Input green you / grey context · Model purple answer / grey thinking · Tools orange call / red failed",
   "  the lanes are a window that follows the cursor: …N / N… are events hidden either side, all = whole session",
+  "  │ in the lanes is a turn boundary · the lanes show what the f filter shows (f → tools-only = just calls)",
 ]
 
 /** `f` opens this as a picker; `F` steps back through it (DESIGN.md §7.5). */
 const FILTERS: { title: string; value: Filter; description: string }[] = [
   { title: "default", value: "default", description: "user turns, assistant text, tool steps" },
   { title: "no-tools", value: "no-tools", description: "hide ⚙ tool steps" },
+  { title: "tools-only", value: "tools-only", description: "⚙ tool steps only — what did I run (the lanes follow)" },
   { title: "user-only", value: "user-only", description: "● user turns only" },
   { title: "labeled", value: "labeled", description: "labelled rows only" },
   { title: "all", value: "all", description: "everything, thinking parts included" },
@@ -254,7 +256,8 @@ export function TreeRoute(props: TreeRouteProps) {
   const [summaryAbort, setSummaryAbort] = createSignal<AbortController | undefined>()
   const [cropMode, setCropMode] = createSignal<"result" | "turn" | undefined>()
   const [panel, setPanel] = createSignal<"tree" | "decisions" | "consumers" | "help">(props.initialView ?? "tree")
-  const [laneMode, setLaneMode] = createSignal<LaneMode>(api.kv.get<LaneMode>("ctree.lanes", "turns"))
+  // "calls" was a third mode until it became the `tools-only` row filter; old kv still holds it
+  const [laneMode, setLaneMode] = createSignal<LaneMode>(api.kv.get<LaneMode>("ctree.lanes", "turns") === "duration" ? "duration" : "turns")
   // DSH lanes and inspector are first-class but off by default, so the first screen reads as
   // Pi's clean outline (header + tree + footer); `1/2/3` and `i` bring them in, one keystroke.
   const [lanesOn, setLanesOn] = createSignal<boolean>(api.kv.get<boolean>("ctree.lanesOn", false))
@@ -396,7 +399,7 @@ export function TreeRoute(props: TreeRouteProps) {
   // ---- lane geometry (the lanes themselves are further down) ----------------
   // 61 = the 12-cell label column + the `N…` cue + the mode legend that follows the Input lane
   const laneWidth = () => Math.max(10, Math.min(width() - 61, 80))
-  const layout = createMemo(() => layoutEventStrip(live() ?? EMPTY_TRANSCRIPT, laneMode()))
+  const layout = createMemo(() => layoutEventStrip(live() ?? EMPTY_TRANSCRIPT, laneMode(), filter()))
   /** DESIGN.md §7.6: below 80 columns the strip is the Input lane alone. */
   const showAllLanes = () => cols() >= 80
   /** The overview track only exists — and only costs its row — when the timeline overflows. */
@@ -615,6 +618,7 @@ export function TreeRoute(props: TreeRouteProps) {
     const cur = cursorEvents()
     const start = laneOffset()
     const w = laneWidth()
+    const rules = new Set(layout().rules)
     const runs: { text: string; fg: unknown; bg: unknown }[] = []
     for (let c = 0; c < w; c++) {
       const cell = layout().lanes[lane][start + c] ?? null
@@ -622,9 +626,12 @@ export function TreeRoute(props: TreeRouteProps) {
       const color = cell === null ? t.textMuted : cellColor(cell)
       const fg = sel ? t.background : color
       const bg = sel ? color : undefined
+      // a turn boundary is a rule across all three lanes, the way DSH marks turns on its
+      // Overview — it never lands on a pill, the gap that holds it is opened for it
+      const glyph = cell?.glyph ?? (rules.has(start + c) ? "│" : " ")
       const last = runs[runs.length - 1]
-      if (last && last.fg === fg && last.bg === bg) last.text += cell?.glyph ?? " "
-      else runs.push({ text: cell?.glyph ?? " ", fg, bg })
+      if (last && last.fg === fg && last.bg === bg) last.text += glyph
+      else runs.push({ text: glyph, fg, bg })
     }
     return runs
   }
@@ -1303,7 +1310,6 @@ export function TreeRoute(props: TreeRouteProps) {
       { name: "ctree.copy", hidden: true, enabled: treeIdle, run: () => copySelected() },
       { name: "ctree.mode_duration", hidden: true, enabled: treePanel, run: () => setLane("duration") },
       { name: "ctree.mode_turns", hidden: true, enabled: treePanel, run: () => setLane("turns") },
-      { name: "ctree.mode_calls", hidden: true, enabled: treePanel, run: () => setLane("calls") },
       { name: "ctree.lanes_off", hidden: true, enabled: treePanel, run: () => { setLanesOn(false); api.kv.set("ctree.lanesOn", false) } },
       { name: "ctree.decisions", hidden: true, enabled: () => !inCrop(), run: () => setPanel(panel() === "decisions" ? "tree" : "decisions") },
       { name: "ctree.export", hidden: true, enabled: () => panel() === "decisions", run: () => exportDecisionsFile() },
@@ -1358,6 +1364,35 @@ export function TreeRoute(props: TreeRouteProps) {
     return `${lead}${where}${clipTo(title(), Math.max(8, room))}${tail}${modeTag()}   `
   }
 
+  /** The turn a row sits in, for the `T<n>` in the prompt figure — the same walk the
+   *  inspector's `Hierarchy` line does. */
+  const turnOf = (row: Row) => {
+    const i = view().indexById[row.id]
+    if (i === undefined) return undefined
+    const owner = view().rows.slice(0, i + 1).findLast((r) => r.kind === "turn")
+    return owner?.kind === "turn" ? owner.turn : undefined
+  }
+
+  /** What the selected row is, for the prompt figure: a tool step is named by its tool. */
+  const whatOf = (row: Row) => {
+    if (row.kind !== "step") return "reply"
+    if (row.glyph === "◇") return "compaction"
+    if (row.glyph !== "⚙") return "reply"
+    const tr = row.sessionID === sessionID ? live() : others()[row.sessionID]
+    const part = tr?.messages.find((m) => m.id === row.messageID)?.parts.find((p) => p.id === row.partID)
+    return part?.type === "tool" ? (part.tool ?? "tool") : "reply"
+  }
+
+  /** `T2 reply · prompt 43.7k · 30.1k cached` for the row under the cursor: what the provider
+   *  was really sent at that point, against the whole-session `ctx …` gauge directly above it.
+   *  It is history — an older row's prompt is what went out *then*, before any crop or merge
+   *  you have applied since (DESIGN.md §6.7). */
+  const promptHere = () => {
+    const row = current()
+    if (!row) return ""
+    return formatPromptAt(promptAtRow(row, transcripts()), { turn: turnOf(row), what: whatOf(row) })
+  }
+
   const statusLine = () => {
     const n = view().rows.length
     const pos = `${n ? Math.min(selected() + 1, n) : 0}/${n}`
@@ -1368,7 +1403,12 @@ export function TreeRoute(props: TreeRouteProps) {
     if (searchMode()) return `search: ${search()}▏ · ${pos} rows · ⏎ keeps it · esc clears`
     const said = notice()
     if (said) return `${clipTo(said, cols())}   ${pos} rows`
-    return `filter: ${filter()}${search() ? `   search: "${search()}"` : ""}${busy() ? `   … ${busy()}` : ""}   ${pos} rows`
+    const left = `filter: ${filter()}${search() ? `   search: "${search()}"` : ""}${busy() ? `   … ${busy()}` : ""}   ${pos} rows`
+    const right = promptHere()
+    // right-aligned under the header's `ctx …`; dropped rather than wrapped when the
+    // terminal is too narrow to hold both (DESIGN.md §7.6)
+    const room = cols() - 4 - left.length - right.length
+    return right && room >= 3 ? `${left}${" ".repeat(room)}${right}` : left
   }
 
   /** `⏎` does four different things; the footer says which one for the row under the cursor. */
@@ -1412,7 +1452,7 @@ export function TreeRoute(props: TreeRouteProps) {
           <Show when={!layout().empty.input} fallback={<text fg={t.textMuted}>{"no input".padEnd(laneWidth())}</text>}>
             <For each={inputRuns()}>{(r) => <text fg={r.fg as never} bg={r.bg as never}>{r.text}</text>}</For>
           </Show>
-          <text fg={t.textMuted}>{`${(hiddenRight() > 0 ? `${laneCue(hiddenRight())}…` : "").padStart(4).padEnd(5)}${laneMode() === "duration" ? "[1] Duration" : " 1  duration"} · ${laneMode() === "turns" ? "[2] Turns" : " 2  turns"} · ${laneMode() === "calls" ? "[3] Calls" : " 3  calls"} · 0 off`}</text>
+          <text fg={t.textMuted}>{`${(hiddenRight() > 0 ? `${laneCue(hiddenRight())}…` : "").padStart(4).padEnd(5)}${laneMode() === "duration" ? "[1] Duration" : " 1  duration"} · ${laneMode() === "turns" ? "[2] Turns" : " 2  turns"} · 0 off`}</text>
         </box>
         <Show when={showAllLanes()}>
           <box flexDirection="row">

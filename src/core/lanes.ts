@@ -1,30 +1,18 @@
 /**
- * DSH-style timeline lanes (DESIGN.md §7.1, §7.3): three series — Input, Model,
- * Tools — over the chosen mode's x-axis. Two models live here: the original
- * magnitude columns (`buildLanes` + `sparkline`) and the event strip
- * (`buildEventStrip`), which is what the DSH bar actually draws. Pure.
+ * Timeline lanes (DESIGN.md §7.1, §7.3): three series — Input, Model, Tools — of one pill
+ * per event on one shared axis, with turn boundaries drawn as a rule across all three.
+ *
+ * Two things pick what you see, and they are deliberately different questions:
+ * `LaneMode` is only the **x-scale** (uniform per event, or proportional to wall clock),
+ * and the route's row `Filter` is **which events** — so "tool calls only" is the same
+ * `tools-only` filter that thins the rows, never a third mode that redraws the same
+ * events a cell wider. Pure.
  */
 import { estimateTokens } from "./tokens.js"
 import { stepKind, type StepPart, type Transcript, type TranscriptMessage } from "./transcript.js"
+import type { Filter } from "./tree.js"
 
-export type LaneMode = "turns" | "calls" | "duration"
-
-export type LaneColumn = {
-  /** identifies what the column represents, for cursor mirroring */
-  messageID: string
-  /** the column's user message, so the cursor also mirrors ● rows (turns/duration mode) */
-  userMessageID?: string
-  partID?: string
-  turn: number
-  input: number
-  output: number
-  tool: number
-  toolError: boolean
-  /** wall-clock span of the column, ms (duration mode) */
-  ms: number
-}
-
-export type Lanes = { mode: LaneMode; columns: LaneColumn[] }
+export type LaneMode = "turns" | "duration"
 
 type Turn = { user?: TranscriptMessage; assistants: TranscriptMessage[]; index: number }
 
@@ -45,107 +33,6 @@ function turnsOf(messages: TranscriptMessage[]): Turn[] {
 function spanOf(m: TranscriptMessage): number {
   const end = m.time.completed ?? m.parts.reduce((e, p) => Math.max(e, p.state?.time?.end ?? p.time?.end ?? 0), 0)
   return end > m.time.created ? end - m.time.created : 0
-}
-
-export function buildLanes(transcript: Transcript, mode: LaneMode): Lanes {
-  const columns: LaneColumn[] = []
-  for (const turn of turnsOf(transcript.messages)) {
-    if (mode === "calls") {
-      let any = false
-      for (const m of turn.assistants) {
-        for (const p of m.parts) {
-          if (p.type !== "tool") continue
-          any = true
-          const out = p.state?.output ?? ""
-          const t = p.state?.time
-          columns.push({ messageID: m.id, userMessageID: turn.user?.id, partID: p.id, turn: turn.index, input: m.tokens?.input ?? 0, output: 0, tool: estimateTokens(out), toolError: p.state?.status === "error", ms: t?.start !== undefined && t?.end !== undefined ? t.end - t.start : 0 })
-        }
-      }
-      if (!any) {
-        const last = turn.assistants.at(-1)
-        columns.push({ messageID: last?.id ?? turn.user?.id ?? "", userMessageID: turn.user?.id, turn: turn.index, input: last?.tokens?.input ?? 0, output: last?.tokens?.output ?? 0, tool: 0, toolError: false, ms: last ? spanOf(last) : 0 })
-      }
-      continue
-    }
-    // turns / duration: one column per user turn
-    const last = turn.assistants.at(-1)
-    let tool = 0
-    let toolError = false
-    let ms = 0
-    let output = 0
-    for (const m of turn.assistants) {
-      output += m.tokens?.output ?? 0
-      ms += spanOf(m)
-      for (const p of m.parts) {
-        if (p.type !== "tool") continue
-        tool += estimateTokens(p.state?.output ?? "")
-        if (p.state?.status === "error") toolError = true
-      }
-    }
-    columns.push({ messageID: last?.id ?? turn.user?.id ?? "", userMessageID: turn.user?.id, turn: turn.index, input: last?.tokens?.input ?? 0, output, tool, toolError, ms })
-  }
-  return { mode, columns }
-}
-
-const BLOCKS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
-
-/** `scale` (the model's context limit for the Input lane) fixes the reference height, so a
- *  two-message session no longer draws a full bar next to `ctx 100 · low`. */
-export function sparkline(values: number[], width: number, scale?: number): string {
-  if (values.length === 0 || width <= 0) return ""
-  const cells = fitColumns(values, width)
-  const max = Math.max(1, scale ?? 0, ...cells)
-  return cells.map((v) => (v <= 0 ? " " : BLOCKS[Math.min(7, Math.floor((v / max) * 7.999))]!)).join("")
-}
-
-/** Resample `values` to exactly `width` cells (max-pooling when shrinking, repeating when growing). */
-export function fitColumns(values: number[], width: number): number[] {
-  if (values.length === 0) return []
-  if (values.length === width) return values.slice()
-  const out: number[] = []
-  if (values.length > width) {
-    const per = values.length / width
-    for (let i = 0; i < width; i++) {
-      const a = Math.floor(i * per)
-      const b = Math.max(a + 1, Math.floor((i + 1) * per))
-      out.push(Math.max(...values.slice(a, b)))
-    }
-    return out
-  }
-  const rep = width / values.length
-  for (let i = 0; i < width; i++) out.push(values[Math.min(values.length - 1, Math.floor(i / rep))]!)
-  return out
-}
-
-/** Duration mode: repeat each column proportionally to its wall-clock share. */
-export function durationWeighted(lanes: Lanes, width: number): { input: number[]; output: number[]; tool: number[]; toolError: boolean[]; columnAt: (cell: number) => number } {
-  const total = lanes.columns.reduce((s, c) => s + Math.max(1, c.ms), 0) || 1
-  const input: number[] = []
-  const output: number[] = []
-  const tool: number[] = []
-  const toolError: boolean[] = []
-  const owner: number[] = []
-  lanes.columns.forEach((c, i) => {
-    const cells = Math.max(1, Math.round((Math.max(1, c.ms) / total) * width))
-    for (let k = 0; k < cells; k++) {
-      input.push(c.input)
-      output.push(c.output)
-      tool.push(c.tool)
-      toolError.push(c.toolError)
-      owner.push(i)
-    }
-  })
-  return { input, output, tool, toolError, columnAt: (cell) => owner[Math.min(owner.length - 1, Math.max(0, cell))] ?? 0 }
-}
-
-/** Index of the column that contains a given message/part (for the cursor marker). */
-export function columnFor(lanes: Lanes, messageID: string, partID?: string): number {
-  if (partID) {
-    const i = lanes.columns.findIndex((c) => c.partID === partID)
-    if (i >= 0) return i
-  }
-  const i = lanes.columns.findIndex((c) => c.messageID === messageID || c.userMessageID === messageID)
-  return i >= 0 ? i : -1
 }
 
 /* ── Event strip (DESIGN.md §7.1's DSH trajectory bar) ────────────────────────
@@ -170,20 +57,6 @@ export type LaneEvent = {
 
 /** One terminal cell of one lane. */
 export type StripCell = { lane: LaneEvent["lane"]; eventIndex: number; glyph: string; error?: boolean }
-
-export type EventStrip = {
-  /** time order; only the events that fit — see `truncatedLeft` */
-  events: LaneEvent[]
-  width: number
-  /** `width` cells each; null = gap/empty */
-  lanes: Record<LaneEvent["lane"], (StripCell | null)[]>
-  /** cell index range [start, end) of `events[i]`, for cursor/scroll mapping */
-  spans: { start: number; end: number }[]
-  /** lane has no events in the strip (render "no tool calls" etc.) */
-  empty: Record<LaneEvent["lane"], boolean>
-  /** older events dropped off the left because they did not fit */
-  truncatedLeft: number
-}
 
 const EVENT_GLYPH = "▬"
 
@@ -227,7 +100,32 @@ function partEvent(message: TranscriptMessage, part: StepPart, turn: number): La
   return { ...base, lane: "model", kind: part.type === "reasoning" ? "reasoning" : "text", tokens: estimateTokens(part.text ?? "") }
 }
 
-function eventsOf(transcript: Transcript): LaneEvent[] {
+/**
+ * Which events a row filter leaves on the strip, so the lanes and the rows always answer the
+ * same question (DESIGN.md §7.3): `tools-only` is the "what did I run" view in both, and
+ * there is no lane mode that does it separately.
+ *
+ * Two deliberate mismatches with `stepAllowed`: `labeled` is an annotation on a row, not a
+ * property of an event, so the lanes read it as no filter at all; and reasoning stays on the
+ * Model lane in every filter, because folding it into its assistant row is a *reading*
+ * convenience and the strip is a timeline — a minute of thinking is a thing that happened.
+ */
+export function eventAllowed(filter: Filter, kind: LaneEvent["kind"]): boolean {
+  switch (filter) {
+    case "user-only":
+      return kind === "user" || kind === "context"
+    case "tools-only":
+      return kind === "tool"
+    case "no-tools":
+      return kind !== "tool"
+    case "default":
+    case "labeled":
+    case "all":
+      return true
+  }
+}
+
+function eventsOf(transcript: Transcript, filter: Filter): LaneEvent[] {
   const out: LaneEvent[] = []
   for (const turn of turnsOf(transcript.messages)) {
     if (turn.user) out.push(messageEvent(turn.user, turn.index))
@@ -242,12 +140,15 @@ function eventsOf(transcript: Transcript): LaneEvent[] {
       }
     }
   }
-  return out
+  return out.filter((e) => eventAllowed(filter, e.kind))
 }
 
-/** Turns mode groups by turn, so a turn boundary breaks wider than a step boundary. */
-function gapBefore(events: LaneEvent[], i: number, mode: LaneMode): number {
-  return mode === "turns" && events[i]!.turn !== events[i - 1]!.turn ? 2 : 1
+/** A turn boundary is drawn, not implied: DSH's Overview marks turns with a rule rather than
+ *  offering a "turns" layout, so the gap widens to hold one and both modes get it. */
+const TURN_RULE_GAP = 3
+
+function isTurnBoundary(events: LaneEvent[], i: number): boolean {
+  return i > 0 && events[i]!.turn !== events[i - 1]!.turn
 }
 
 function durationWidths(events: LaneEvent[], budget: number): number[] {
@@ -270,7 +171,7 @@ function durationWidths(events: LaneEvent[], budget: number): number[] {
 const DURATION_CELLS = 4
 
 export type EventLayout = {
-  /** every event of the transcript, in time order */
+  /** every event the filter left, in time order */
   events: LaneEvent[]
   /** cell range [start, end) of `events[i]` on the unbounded axis */
   spans: { start: number; end: number }[]
@@ -278,16 +179,25 @@ export type EventLayout = {
   /** `totalWidth` cells each; null = gap/empty */
   lanes: Record<LaneEvent["lane"], (StripCell | null)[]>
   empty: Record<LaneEvent["lane"], boolean>
+  /** cells carrying a turn rule, drawn across every lane */
+  rules: number[]
 }
 
-/** The whole timeline on one axis, however wide it comes out — `windowFor` picks the slice to draw. */
-export function layoutEventStrip(transcript: Transcript, mode: LaneMode): EventLayout {
-  const events = eventsOf(transcript)
+/**
+ * The whole timeline on one axis, however wide it comes out — `windowFor` picks the slice to
+ * draw. `mode` sets only the x-scale: one cell per event, or cells proportional to wall clock.
+ * `filter` decides which events are on it at all.
+ */
+export function layoutEventStrip(transcript: Transcript, mode: LaneMode, filter: Filter = "all"): EventLayout {
+  const events = eventsOf(transcript, filter)
   const widths = mode === "duration" ? durationWidths(events, events.length * DURATION_CELLS) : events.map(() => 1)
   const spans: { start: number; end: number }[] = []
+  const rules: number[] = []
   let cursor = 0
   events.forEach((_, i) => {
-    const start = cursor + (i === 0 ? 0 : gapBefore(events, i, mode))
+    const boundary = isTurnBoundary(events, i)
+    if (boundary) rules.push(cursor + 1) // centred in the wider gap it opens
+    const start = cursor + (i === 0 ? 0 : boundary ? TURN_RULE_GAP : 1)
     cursor = start + (widths[i] ?? 1)
     spans.push({ start, end: cursor })
   })
@@ -298,29 +208,7 @@ export function layoutEventStrip(transcript: Transcript, mode: LaneMode): EventL
     for (let c = spans[i]!.start; c < spans[i]!.end; c++) lanes[e.lane][c] = cell
   })
   const has = (lane: LaneEvent["lane"]) => !events.some((e) => e.lane === lane)
-  return { events, spans, totalWidth: cursor, lanes, empty: { input: has("input"), model: has("model"), tools: has("tools") } }
-}
-
-/** The layout windowed at its end: the newest events, as many as `width` holds. */
-export function buildEventStrip(transcript: Transcript, mode: LaneMode, width: number): EventStrip {
-  const w = Math.max(0, Math.floor(width))
-  const layout = layoutEventStrip(transcript, mode)
-  const start = Math.max(0, layout.totalWidth - w)
-  const truncatedLeft = layout.spans.filter((s) => s.end <= start).length
-  const lane = (l: LaneEvent["lane"]): (StripCell | null)[] =>
-    Array.from({ length: w }, (_, c) => {
-      const cell = layout.lanes[l][start + c]
-      return cell ? { ...cell, eventIndex: cell.eventIndex - truncatedLeft } : null
-    })
-  const lanes: EventStrip["lanes"] = { input: lane("input"), model: lane("model"), tools: lane("tools") }
-  return {
-    events: layout.events.slice(truncatedLeft),
-    width: w,
-    lanes,
-    spans: layout.spans.slice(truncatedLeft).map((s) => ({ start: Math.max(0, s.start - start), end: Math.min(w, s.end - start) })),
-    empty: { input: lanes.input.every((c) => c === null), model: lanes.model.every((c) => c === null), tools: lanes.tools.every((c) => c === null) },
-    truncatedLeft,
-  }
+  return { events, spans, totalWidth: cursor, lanes, empty: { input: has("input"), model: has("model"), tools: has("tools") }, rules }
 }
 
 /**

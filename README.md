@@ -137,7 +137,7 @@ Keys inside `/tree` (vim-aligned): `j k` `ctrl+d ctrl+u` `gg G` move · `[ ]` ho
 branches · `h l` `Tab` fold/unfold · `⏎` go (the footer says what it will do for the selected row)
 · `b` branch · `m` merge · `c` crop mode (`space` mark, `a` auto, `t` result⇄turn, `⏎` apply) ·
 `u` undo (`x` too) · `/` live search, `n N` next/prev · `f` filter picker · `i` inspector ·
-`1 2 3` lanes, `0` off · `s` what's filling the context · `D` decisions · `L` label · `y` copy ·
+`1 2` lanes, `0` off · `s` what's filling the context · `D` decisions · `L` label · `y` copy ·
 `?` help · `q`.
 
 ## Commands

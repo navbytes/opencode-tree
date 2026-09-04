@@ -2,6 +2,34 @@
 
 ## 0.2.3 (unreleased)
 
+- **Turns and Calls drew the same chart.** The lane modes only ever differed by one blank cell
+  at each turn boundary — everything else (which events, which lanes, glyphs, colours) was
+  identical, so switching between them looked like nothing happened. Checking DeepSeek Harness
+  settled the fix: its Trajectory Overview has no mode toggle at all, marks turns with rules,
+  and gets "just the tool calls" from search and interval-focus rather than a mode.
+  - `1` / `2` now select only the **x-axis**: Duration (proportional to wall clock) or Turns
+    (one cell per event). `3` is gone.
+  - A turn boundary is drawn as a `│` **rule across all three lanes**, in both modes, instead of
+    a wider gap you had to measure.
+  - "What did I run" is now a row filter, not a mode: `f` cycles through a new **`tools-only`**,
+    and the lanes follow the active filter — so `tools-only` thins the rows and the lanes
+    together, and `no-tools` / `user-only` do too. `labeled` leaves the lanes whole (a label is
+    not an event), and thinking stays on the Model lane under every filter.
+  - A `ctree.lanes` of `"calls"` stored by an older version falls back to Turns.
+- Deleted the original magnitude-column lane model (`buildLanes`, `sparkline`, `fitColumns`,
+  `durationWeighted`, `columnFor`) and `buildEventStrip`, superseded by the windowed layout in
+  0.2.2. None of it was reachable from the route; it survived only because its tests kept
+  passing, which is how the Turns/Calls bug shipped in the first place.
+
+- The tree's status line shows what the provider was really sent at the row under the cursor,
+  right-aligned under the header gauge: `T2 reply · prompt 43.7k · 30.1k cached`. Unlike the
+  per-row token column — a marginal, chars/4 estimate — this is the provider's own
+  `tokens.input` (+ cache), so it includes the system prompt and the tool definitions, and the
+  two numbers stack in one column to be read against each other. A user turn shows the reply to
+  it; a turn with no reply yet reads `not sent yet`; branch headers have none. It is history: an
+  older row's figure is what went out then, and does not shrink when you crop something above it
+  later.
+
 Pi's fork-from-an-earlier-message flow, ported whole:
 
 - `⏎` on a row above where you are now opens Pi's tree-selector question — **No summary** /

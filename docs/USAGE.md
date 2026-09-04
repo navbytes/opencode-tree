@@ -37,7 +37,7 @@ e.g. `{ "keybinds": { "open": "ctrl+t", "up": "k,up", "copy": "none" } }` — na
 `open up down jump_up jump_down half_up half_down first last prev_branch next_branch fold
 unfold toggle go branch label filter_pick filter_prev search search_next search_prev back
 crop crop_toggle_mode mark auto undo merge inspector consumers copy mode_duration mode_turns
-mode_calls lanes_off decisions export help`.
+lanes_off decisions export help`.
 
 ## Upgrading
 
@@ -113,7 +113,7 @@ appended to the trunk as a normal message.*
 | `D` `E` | decisions panel, export `ctree-decisions.md` |
 | `s` | consumers: what is filling the context (`⏎` opens a bucket, `space` marks one entry for crop) |
 | `i` | inspector pane on/off (auto-hidden under 110 columns) |
-| `1 2 3` `0` | timeline lanes by duration / turns / tool calls; `0` off |
+| `1 2` `0` | timeline lanes, x-axis by duration / one cell per event; `0` off. `│` marks a turn boundary, and the lanes show whatever the `f` filter shows — so `f` → `tools-only` is the "what did I run" view in both the rows and the lanes |
 | `L` | label the selected message |
 | `f` `F` | filter picker (default → no-tools → user-only → labeled → all); `F` steps back |
 | `/` `n` `N` | live search: typing re-filters the rows, `⏎` keeps the filter, `esc` clears; `n` `N` next / previous match |
@@ -179,6 +179,22 @@ Palette: **Context tree**, **Branch here**, **Merge branch**, **Decisions**, **L
 - Tokens: a leading `~` means estimated (chars/4); assistant steps use the model's own counts.
   Step durations and lane heights are read from the same data — estimated wherever the `~` is.
 - `⚠` ≥10k tokens, `✂` cropped, `✗` tool error, `◆` decision record, `◇` branch summary.
+
+The right end of the status line (second line, under the `ctx …` gauge) is the same figure for
+the row your cursor is on: `T2 reply · prompt 43.7k · 30.1k cached` — the whole prompt the
+provider was actually sent at that point, **system prompt and tool definitions included**,
+because that is what `tokens.input` covers. Read it against the gauge above it: the gauge is
+now, this is where the cursor is, and the gap between them is everything after that point.
+
+It comes from the provider, not an estimate, so it has no `~`. An assistant step reports its
+own message's prompt; a user turn reports the reply *to* it (the first prompt that included
+it); a turn with no reply yet says `not sent yet`. Branch headers have none — their token
+column is already a subtree total. On a terminal too narrow to hold both, the figure is
+dropped rather than wrapped.
+
+One caveat: it is **history**. An older row's figure is what went out at the time, so it does
+not shrink when you later crop or merge something above it — the estimated per-row column does,
+because it is recomputed from the transcript each time.
 - A branch you just made says `just branched, nothing here yet` — there is nothing to unfold.
 - The gauge on the prompt line: `⎇ fix-flaky · ctx ▓▓░░░ ~46k/200k · filling · 95% cached
   ▲+24% (bash)` — the context of the next prompt (the same figure as OpenCode's own sidebar),
