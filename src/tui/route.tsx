@@ -8,7 +8,7 @@ import { PLUGIN_VERSION } from "../shared/version.js"
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import { abandonedTail, planJump, type AbandonedTail, type JumpPlan } from "../core/actions.js"
 import { foldJournal, type TreeState } from "../core/journal.js"
-import { firstIndex, lastIndex, moveSelection, nextBranchIndex, resolveSelection, toggleExpanded } from "../core/navigation.js"
+import { firstIndex, lastIndex, moveSelection, nextBranchIndex, paneWindow, resolveSelection, scrollPane, toggleExpanded } from "../core/navigation.js"
 import { contextSizeOf, formatContext, formatK, type MinimalMessage } from "../core/tokens.js"
 import { buildSpineMap, buildTreeView, currentChainOf, formatPromptAt, promptAtRow, type Filter, type Row, type StepRow, type TurnRow } from "../core/tree.js"
 import { ContextGauge } from "./gauge.js"
@@ -168,6 +168,9 @@ const DEFAULT_KEYS: Record<string, string[]> = {
   undo: ["u", "x"],
   merge: ["m"],
   inspector: ["i"],
+  inspector_full: ["shift+i"],
+  inspector_up: ["pageup"],
+  inspector_down: ["pagedown"],
   consumers: ["s"],
   copy: ["y"],
   mode_duration: ["1"],
@@ -185,6 +188,10 @@ const DEFAULT_KEYS: Record<string, string[]> = {
   help: ["?", "shift+/"],
   back: ["q", "escape"],
 }
+
+/** Ceiling on the lines the inspector materialises for one field. The pane scrolls, so this is
+ *  only a guard against building a huge array each render; `y` copies the untruncated text. */
+const INSPECTOR_MAX_LINES = 2000
 
 /** Placeholder for the strip while no session is loaded. */
 const EMPTY_TRANSCRIPT: Transcript = { sessionID: "", title: "", status: "available", messages: [] }
@@ -204,7 +211,8 @@ const HELP = [
   "  b branch · m merge · c crop mode (space mark · a auto · t result⇄turn · ⏎ apply · esc leave)",
   "  u undo (alias x) · L label · y copy · E export decisions",
   "Views",
-  "  i inspector · 1 2 lanes (duration/turns x-axis) · 0 off · s consumers · D decisions · f F filter",
+  "  i inspector · I full screen · PgUp/PgDn scroll it · 1 2 lanes (duration/turns x-axis) · 0 off",
+  "  s consumers · D decisions · f F filter",
   "Legend",
   "  ● user · ○ assistant · ⚙ tool step · ◆ decision · ≣ summary · ⎇ branch (a real OpenCode session)",
   "  │ ├ ╰ draw the topology · ▾ open ▸ folded · ← here is the session you are in",
@@ -261,6 +269,11 @@ export function TreeRoute(props: TreeRouteProps) {
   // DSH lanes and inspector are first-class but off by default, so the first screen reads as
   // Pi's clean outline (header + tree + footer); `1/2/3` and `i` bring them in, one keystroke.
   const [lanesOn, setLanesOn] = createSignal<boolean>(api.kv.get<boolean>("ctree.lanesOn", false))
+  /** Full-screen inspector (`shift+i`), and the only inspector below 110 columns where the
+   *  side pane does not fit — DESIGN.md §7.1's promised `pi-context-tree` inspect view. */
+  const [inspectorFull, setInspectorFull] = createSignal(false)
+  /** First inspector line drawn: `PgUp`/`PgDn` move it, a new row resets it. */
+  const [inspectorTop, setInspectorTop] = createSignal(0)
   const [inspector, setInspector] = createSignal<boolean>(api.kv.get<boolean>("ctree.inspector", false))
   const [consumerIndex, setConsumerIndex] = createSignal(0)
   const [consumerOpen, setConsumerOpen] = createSignal<Set<string>>(new Set())
@@ -669,7 +682,12 @@ export function TreeRoute(props: TreeRouteProps) {
   }
 
   // ---- inspector -----------------------------------------------------------
-  const showInspector = () => inspector() && panel() === "tree" && cols() >= 110
+  /** The inspector has content to show — it may land in the side pane or full screen. */
+  const inspectorOpen = () => inspector() && panel() === "tree"
+  /** Full screen when asked for, and whenever the side pane cannot fit: `i` on an 80-column
+   *  terminal used to flip a flag that rendered nothing and said nothing. */
+  const showInspectorFull = () => inspectorOpen() && (inspectorFull() || cols() < 110)
+  const showInspector = () => inspectorOpen() && !showInspectorFull()
   const inspectorWidth = () => Math.min(56, Math.max(36, Math.floor(width() * 0.4)))
   const rowWidth = () => (showInspector() ? width() - inspectorWidth() - 2 : width()) - (cropMode() ? 4 : 0)
   // wraps badly next to the inspector, so break it at the ";" rather than mid-clause
@@ -677,17 +695,19 @@ export function TreeRoute(props: TreeRouteProps) {
   const inspectorLines = createMemo((): { fg: unknown; text: string }[] => {
     const row = current()
     if (!row || row.kind === "separator") return []
-    const w = inspectorWidth() - 3
+    const w = (showInspectorFull() ? width() : inspectorWidth()) - 3
     const clip = (x: string) => (x.length > w ? `${x.slice(0, w - 1)}…` : x)
     const out: { fg: unknown; text: string }[] = []
     const head = (x: string) => out.push({ fg: t.primary, text: clip(x) })
     const kv = (k: string, v: string) => out.push({ fg: t.text, text: clip(`${k.padEnd(10)}${v}`) })
     const muted = (x: string) => out.push({ fg: t.textMuted, text: clip(x) })
-    const block = (label: string, text: string, max: number) => {
+    // every line, for the scroller to window — bounded only so a pathological payload cannot
+    // build an unbounded array on each render; `y` still copies the untruncated original
+    const block = (label: string, text: string) => {
       const lines = text.split("\n").filter((l) => l.length)
       kv(label, lines[0] ?? "")
-      for (const l of lines.slice(1, max)) out.push({ fg: t.text, text: clip(`          ${l}`) })
-      if (lines.length > max) muted(`          … ${lines.length - max} more lines (y to copy)`)
+      for (const l of lines.slice(1, INSPECTOR_MAX_LINES)) out.push({ fg: t.text, text: clip(`          ${l}`) })
+      if (lines.length > INSPECTOR_MAX_LINES) muted(`          … ${lines.length - INSPECTOR_MAX_LINES} more lines (y to copy)`)
     }
     if (row.kind === "branch") {
       head(`⎇ ${row.name}`)
@@ -711,8 +731,8 @@ export function TreeRoute(props: TreeRouteProps) {
         head(`◆ ${decisionSummary(text).title}`)
         kv("Tokens", `~${formatK(row.tokens)}`)
         const lines = renderDecision(text, w)
-        for (const l of lines.slice(0, 16)) out.push({ fg: t.text, text: l })
-        if (lines.length > 16) muted(`… ${lines.length - 16} more lines (y to copy)`)
+        for (const l of lines.slice(0, INSPECTOR_MAX_LINES)) out.push({ fg: t.text, text: l })
+        if (lines.length > INSPECTOR_MAX_LINES) muted(`… ${lines.length - INSPECTOR_MAX_LINES} more lines (y to copy)`)
         return out
       }
       head(`${row.isSummary ? "◇ summary" : "● user"} · T${row.turn}`)
@@ -720,7 +740,7 @@ export function TreeRoute(props: TreeRouteProps) {
       kv("Tokens", `~${formatK(row.tokens)}`)
       kv("At", msg ? new Date(msg.time.created).toISOString().slice(11, 19) : "?")
       if (!row.inContext) muted("not in this branch's context")
-      block("Text", text, 14)
+      block("Text", text)
       return out
     }
     const part = msg?.parts.find((p) => p.id === row.partID)
@@ -740,8 +760,8 @@ export function TreeRoute(props: TreeRouteProps) {
       const dur = st?.time?.start !== undefined && st?.time?.end !== undefined ? `${st.time.end - st.time.start} ms` : "?"
       kv("Status", `${st?.status ?? "?"} · ${dur}`)
       kv("Tokens", `~${formatK(row.tokens)} · ${view().totalTokens ? `${((row.tokens / view().totalTokens) * 100).toFixed(1)}% of context` : ""}`)
-      block("Payload", JSON.stringify(st?.input ?? {}, null, 1), 8)
-      block("Result", String(st?.output ?? ""), 10)
+      block("Payload", JSON.stringify(st?.input ?? {}, null, 1))
+      block("Result", String(st?.output ?? ""))
       kv("Timing", st?.time?.start ? `started ${new Date(st.time.start).toISOString().slice(11, 23)} · ${dur} · session ts` : "n/a")
       const cand = resultCands().find((c) => c.partID === (currentPartOf(row) ?? row.partID))
       kv("Crop", row.isCropped ? `✂ cropped (${UNDO_KEY} to restore)` : cand ? (cand.protections.length ? `protected: ${cand.protections.join(", ")}` : "c then space to stub this result") : "n/a")
@@ -749,10 +769,29 @@ export function TreeRoute(props: TreeRouteProps) {
       kv("Tokens", `~${formatK(row.tokens)}`)
       if (row.durationMs !== undefined) kv("Duration", `${(row.durationMs / 1000).toFixed(1)} s`)
       if (row.thinkingMs !== undefined) kv("Thought", `${(row.thinkingMs / 1000).toFixed(1)} s`)
-      block("Text", part?.text ?? row.preview, 14)
+      block("Text", part?.text ?? row.preview)
     }
     return out
   })
+
+  /** Lines the inspector can draw; one is given up to the position line when it overflows. */
+  const inspectorRoom = () => Math.max(1, height() - (inspectorOverflow() ? 1 : 0))
+  const inspectorOverflow = () => inspectorLines().length > height()
+  /** Clamped here rather than in the setter, so a resize or a shorter row cannot strand the
+   *  view past the end of the content. */
+  const inspectorPane = () => paneWindow(inspectorLines().length, inspectorRoom(), inspectorTop())
+  const inspectorVisible = createMemo(() => inspectorLines().slice(inspectorPane().start, inspectorPane().start + inspectorRoom()))
+  function scrollInspector(dir: 1 | -1) {
+    setInspectorTop(scrollPane(inspectorLines().length, inspectorRoom(), inspectorTop(), dir))
+  }
+  /** `12–40 of 118 · PgUp/PgDn scroll · y copy · I full` — replaces the old per-field
+   *  "… 61 more lines" dead end with where you are and how to see the rest. */
+  const inspectorStatus = () => {
+    const { from, to } = inspectorPane()
+    return clipTo(`${from}–${to} of ${inspectorLines().length} · PgUp/PgDn · y copy · ${inspectorFull() ? "I pane" : "I full"}`, (showInspectorFull() ? width() : inspectorWidth()) - 3)
+  }
+  // a new row is new content: keep the reader at its top rather than mid-way down a payload
+  createEffect(on(() => `${current()?.id ?? ""}:${showInspectorFull()}`, () => setInspectorTop(0)))
 
   // ---- consumers -------------------------------------------------------------
   const consumerRows = createMemo(() => (live() ? consumers(live()!, { cropped: alreadyCropped(), limit: contextLimit() }) : []))
@@ -1306,6 +1345,21 @@ export function TreeRoute(props: TreeRouteProps) {
       { name: "ctree.undo", hidden: true, enabled: treeIdle, run: () => void undo() },
       { name: "ctree.merge", hidden: true, enabled: treeIdle, run: () => void merge() },
       { name: "ctree.inspector", hidden: true, enabled: () => !inCrop(), run: () => { setInspector(!inspector()); api.kv.set("ctree.inspector", inspector()) } },
+      {
+        name: "ctree.inspector_full",
+        hidden: true,
+        enabled: () => !inCrop(),
+        // from a closed inspector this opens it full screen, so `shift+i` is one key to "show me all of it"
+        run: () => {
+          if (!inspector()) {
+            setInspector(true)
+            api.kv.set("ctree.inspector", true)
+          } else setInspectorFull(!inspectorFull())
+          setInspectorTop(0)
+        },
+      },
+      { name: "ctree.inspector_up", hidden: true, enabled: inspectorOpen, run: () => scrollInspector(-1) },
+      { name: "ctree.inspector_down", hidden: true, enabled: inspectorOpen, run: () => scrollInspector(1) },
       { name: "ctree.consumers", hidden: true, enabled: () => !inCrop(), run: () => setPanel(panel() === "consumers" ? "tree" : "consumers") },
       { name: "ctree.copy", hidden: true, enabled: treeIdle, run: () => copySelected() },
       { name: "ctree.mode_duration", hidden: true, enabled: treePanel, run: () => setLane("duration") },
@@ -1323,6 +1377,10 @@ export function TreeRoute(props: TreeRouteProps) {
             draft.abort()
             setSummaryAbort(undefined)
             notify("cancelling the branch summary…")
+            return
+          }
+          if (showInspectorFull() && inspectorFull()) {
+            setInspectorFull(false)
             return
           }
           if (panel() !== "tree") {
@@ -1422,6 +1480,7 @@ export function TreeRoute(props: TreeRouteProps) {
   }
 
   const footer = () => {
+    if (showInspectorFull()) return `PgUp/PgDn scroll  y copy  ${cols() >= 110 ? "I pane  " : ""}i close  q back`
     if (cropMode()) return "space mark  a auto  t result⇄turn  ⏎ apply  esc leave"
     if (panel() === "decisions") return "⏎ jump to record  E export  q back"
     if (panel() === "consumers") return "⏎ expand  space mark  c crop  q back"
@@ -1529,6 +1588,7 @@ export function TreeRoute(props: TreeRouteProps) {
         <text fg={t.textMuted}>│ {emptyText()}</text>
       </Show>
       <box flexDirection="row" flexGrow={1}>
+      <Show when={!showInspectorFull()}>
       <box flexDirection="column" flexGrow={1}>
       <Show when={showsTree() && overflow()}>
         <text fg={t.textMuted}>│ {hiddenAbove() > 0 ? `↑ ${hiddenAbove()} more` : ""}</text>
@@ -1593,9 +1653,13 @@ export function TreeRoute(props: TreeRouteProps) {
       {/* the help pane sits under the rows, so the tree it explains stays on screen */}
       <For each={panel() === "help" ? HELP.slice(0, helpHeight()) : []}>{(l) => <text fg={l.startsWith(" ") ? t.textMuted : t.accent}>│ {l}</text>}</For>
       </box>
-      <Show when={showInspector()}>
-        <box flexDirection="column" width={inspectorWidth()} paddingLeft={1}>
-          <For each={inspectorLines()}>{(l) => <text fg={l.fg as never}>┃ {l.text}</text>}</For>
+      </Show>
+      <Show when={showInspector() || showInspectorFull()}>
+        <box flexDirection="column" width={showInspectorFull() ? undefined : inspectorWidth()} flexGrow={showInspectorFull() ? 1 : undefined} paddingLeft={1}>
+          <For each={inspectorVisible()}>{(l) => <text fg={l.fg as never}>┃ {l.text}</text>}</For>
+          <Show when={inspectorOverflow()}>
+            <text fg={t.accent}>┃ {inspectorStatus()}</text>
+          </Show>
         </box>
       </Show>
       </box>
