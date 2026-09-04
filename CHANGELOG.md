@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.2 (unreleased)
+## 0.2.3 (unreleased)
 
 Pi's fork-from-an-earlier-message flow, ported whole:
 
@@ -24,6 +24,8 @@ Pi's fork-from-an-earlier-message flow, ported whole:
   summary covers the reply as it actually ended.
 - A jump with nothing below the selected point, and `jumpSummary: "never"`, skip the question
   and show the plain confirm.
+
+## 0.2.2 — 2026-09-03
 
 Found by a long driven session on a real model (13 tool-using turns, three fork paths, three
 merge paths, result and turn crops, undo, resume) and 50/100/200-turn scale runs:
