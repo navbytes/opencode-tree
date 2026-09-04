@@ -2,6 +2,15 @@
 
 ## 0.2.3 (unreleased)
 
+- The tree's status line shows what the provider was really sent at the row under the cursor,
+  right-aligned under the header gauge: `T2 reply · prompt 43.7k · 30.1k cached`. Unlike the
+  per-row token column — a marginal, chars/4 estimate — this is the provider's own
+  `tokens.input` (+ cache), so it includes the system prompt and the tool definitions, and the
+  two numbers stack in one column to be read against each other. A user turn shows the reply to
+  it; a turn with no reply yet reads `not sent yet`; branch headers have none. It is history: an
+  older row's figure is what went out then, and does not shrink when you crop something above it
+  later.
+
 Pi's fork-from-an-earlier-message flow, ported whole:
 
 - `⏎` on a row above where you are now opens Pi's tree-selector question — **No summary** /

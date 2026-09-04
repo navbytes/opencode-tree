@@ -10,7 +10,7 @@ import { abandonedTail, planJump, type AbandonedTail, type JumpPlan } from "../c
 import { foldJournal, type TreeState } from "../core/journal.js"
 import { firstIndex, lastIndex, moveSelection, nextBranchIndex, resolveSelection, toggleExpanded } from "../core/navigation.js"
 import { contextSizeOf, formatContext, formatK, type MinimalMessage } from "../core/tokens.js"
-import { buildSpineMap, buildTreeView, currentChainOf, type Filter, type Row, type StepRow, type TurnRow } from "../core/tree.js"
+import { buildSpineMap, buildTreeView, currentChainOf, formatPromptAt, promptAtRow, type Filter, type Row, type StepRow, type TurnRow } from "../core/tree.js"
 import { ContextGauge } from "./gauge.js"
 import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
@@ -211,6 +211,7 @@ const HELP = [
   "  │ ├ ╰ draw the topology · ▾ open ▸ folded · ← here is the session you are in",
   "  dim rows are not sent to the model; ── not in this branch's context ── is where your path forked",
   "  right column is tokens; ~ estimated · ⚠ ≥10k · ✂ cropped · ✗ tool error",
+  "  status-line right: the prompt really sent at the cursor · history, not re-costed after a crop",
   "  ⎇ colours: open green · squashed blue · rejected/discarded red · abandoned grey",
   "  lanes: Input green you / grey context · Model purple answer / grey thinking · Tools orange call / red failed",
   "  the lanes are a window that follows the cursor: …N / N… are events hidden either side, all = whole session",
@@ -1358,6 +1359,35 @@ export function TreeRoute(props: TreeRouteProps) {
     return `${lead}${where}${clipTo(title(), Math.max(8, room))}${tail}${modeTag()}   `
   }
 
+  /** The turn a row sits in, for the `T<n>` in the prompt figure — the same walk the
+   *  inspector's `Hierarchy` line does. */
+  const turnOf = (row: Row) => {
+    const i = view().indexById[row.id]
+    if (i === undefined) return undefined
+    const owner = view().rows.slice(0, i + 1).findLast((r) => r.kind === "turn")
+    return owner?.kind === "turn" ? owner.turn : undefined
+  }
+
+  /** What the selected row is, for the prompt figure: a tool step is named by its tool. */
+  const whatOf = (row: Row) => {
+    if (row.kind !== "step") return "reply"
+    if (row.glyph === "◇") return "compaction"
+    if (row.glyph !== "⚙") return "reply"
+    const tr = row.sessionID === sessionID ? live() : others()[row.sessionID]
+    const part = tr?.messages.find((m) => m.id === row.messageID)?.parts.find((p) => p.id === row.partID)
+    return part?.type === "tool" ? (part.tool ?? "tool") : "reply"
+  }
+
+  /** `T2 reply · prompt 43.7k · 30.1k cached` for the row under the cursor: what the provider
+   *  was really sent at that point, against the whole-session `ctx …` gauge directly above it.
+   *  It is history — an older row's prompt is what went out *then*, before any crop or merge
+   *  you have applied since (DESIGN.md §6.7). */
+  const promptHere = () => {
+    const row = current()
+    if (!row) return ""
+    return formatPromptAt(promptAtRow(row, transcripts()), { turn: turnOf(row), what: whatOf(row) })
+  }
+
   const statusLine = () => {
     const n = view().rows.length
     const pos = `${n ? Math.min(selected() + 1, n) : 0}/${n}`
@@ -1368,7 +1398,12 @@ export function TreeRoute(props: TreeRouteProps) {
     if (searchMode()) return `search: ${search()}▏ · ${pos} rows · ⏎ keeps it · esc clears`
     const said = notice()
     if (said) return `${clipTo(said, cols())}   ${pos} rows`
-    return `filter: ${filter()}${search() ? `   search: "${search()}"` : ""}${busy() ? `   … ${busy()}` : ""}   ${pos} rows`
+    const left = `filter: ${filter()}${search() ? `   search: "${search()}"` : ""}${busy() ? `   … ${busy()}` : ""}   ${pos} rows`
+    const right = promptHere()
+    // right-aligned under the header's `ctx …`; dropped rather than wrapped when the
+    // terminal is too narrow to hold both (DESIGN.md §7.6)
+    const room = cols() - 4 - left.length - right.length
+    return right && room >= 3 ? `${left}${" ".repeat(room)}${right}` : left
   }
 
   /** `⏎` does four different things; the footer says which one for the row under the cursor. */

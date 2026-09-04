@@ -447,6 +447,24 @@ auto-compaction is the *lossy* event the user wants to pre-empt with `/crop` or
 `/merge`. `sidebar_content` slot: `⎇ fix-flaky-test · open · parent "Fix flaky test"`,
 active crops, decisions on path, `[/tree]`.
 
+
+**The cursor's own prompt figure.** The tree's status line carries, right-aligned directly under
+the header gauge, what the provider was really sent at the row you are on:
+`T2 reply · prompt 43.7k · 30.1k cached`. It sums `input + cache.read + cache.write` exactly as
+`contextSizeOf` does, so the two numbers stack in one column and are read against each other —
+the gauge is now, this is the cursor, the gap is everything after that point. Because it is
+`tokens.input`, it inherently includes the system prompt and the tool definitions, which the
+per-row token column (a marginal, chars/4 estimate) never does.
+
+`core/tree.ts#promptAtRow` resolves it: an assistant step carries its own message's report on
+every one of its rows; a user turn takes the first assistant message after it, the reply whose
+prompt was the first to include that turn; a branch header has none, its column already being a
+subtree total. Nothing sent yet — a trailing turn, a reply in flight — reads `not sent yet`
+rather than a zero. It is deliberately **not** a second per-row column: it is history (an older
+row's figure is what went out then, not what a later crop would send now), and one number the
+user is deliberately inspecting can carry that caveat where forty scrolling ones cannot. Dropped
+whole, not wrapped, when the terminal is too narrow (§7.6).
+
 ### 6.8 Compaction interplay
 
 - The transform hook runs during compaction too, so cropped results are already
