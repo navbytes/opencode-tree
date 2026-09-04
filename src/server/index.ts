@@ -47,14 +47,20 @@ function nameSystemPart(text: string, index: number): string {
  * line below is how to confirm that on a live server), nothing is written and every reader
  * treats the absence as "unknown", never as "zero".
  */
+/** Last shape written per session, so an unchanged prompt costs no filesystem write at all —
+ *  this hook runs on every single request. */
+const lastSystem = new Map<string, string>()
+
 function captureSystem(store: JournalStore, sessionID: string, system: readonly string[]): void {
   try {
     const parts = system
       .map((text, i) => ({ name: nameSystemPart(text, i), chars: text.length, text }))
       .filter((p) => p.chars > 0)
-    debug("system.captured", { sessionID, parts: parts.length, chars: parts.reduce((n, p) => n + p.chars, 0) })
-    if (parts.length === 0) return
+    const shape = parts.map((p) => `${p.name}:${p.chars}`).join("|")
+    debug("system.captured", { sessionID, parts: parts.length, chars: parts.reduce((n, p) => n + p.chars, 0), unchanged: lastSystem.get(sessionID) === shape })
+    if (parts.length === 0 || lastSystem.get(sessionID) === shape) return
     store.writeSystem(sessionID, { v: 1, ts: Date.now(), parts })
+    lastSystem.set(sessionID, shape)
   } catch (e) {
     debug("system.capture.failed", { error: e instanceof Error ? e.message : String(e) })
   }
@@ -296,11 +302,17 @@ export const server: Plugin = async ({ worktree, client, directory }, options) =
     // this is the one place the plugin can see what the provider is really sent as its system
     // prompt, so it is also where the consumers view gets the bucket it was missing.
     "experimental.chat.system.transform": async ({ sessionID }, output) => {
-      if (!sessionID || !(await journal).stateForSession(sessionID)) return
-      // snapshot what OpenCode assembled, BEFORE our own note joins it — the note is ours, and
+      if (!sessionID) return
+      // Snapshot what OpenCode assembled, BEFORE our own note joins it — the note is ours, and
       // counting it as part of the user's prompt would be a small lie in the one view that
-      // exists to say where the context went
+      // exists to say where the context went.
+      //
+      // Deliberately NOT gated on the session being in a tree, unlike the note below: a session
+      // is only registered by a branch/fork/adoption, so gating here would mean a plain session
+      // never captured its prompt and the consumers bucket silently never appeared — which is
+      // the common case, not the edge one.
       captureSystem(await journal, sessionID, output.system)
+      if (!(await journal).stateForSession(sessionID)) return
       output.system.push(
         "Context notes: messages starting with ◆ are decision records confirmed by the user — treat them as settled facts. Tool results reading [cropped: …] or turns reading [dropped turn …] were removed from your context on purpose to save space; if you need one back, ask the user to restore it (they can with /undo in the context tree).",
       )
