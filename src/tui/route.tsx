@@ -796,7 +796,15 @@ export function TreeRoute(props: TreeRouteProps) {
   createEffect(on(() => `${current()?.id ?? ""}:${showInspectorFull()}`, () => setInspectorTop(0)))
 
   // ---- consumers -------------------------------------------------------------
-  const consumerRows = createMemo(() => (live() ? consumers(live()!, { cropped: alreadyCropped(), limit: contextLimit() }) : []))
+  /** The system parts the server half captured for this session, if it has seen a request yet.
+   *  Absent means "we have not seen this session's prompt", never "it costs nothing", so the
+   *  bucket simply does not appear rather than reporting a misleading zero. */
+  const systemParts = createMemo(() => {
+    tick() // the server half rewrites the snapshot on each request; follow the same poll the tree does
+    if (!sessionID) return undefined
+    return store.readSystem(sessionID)?.parts
+  })
+  const consumerRows = createMemo(() => (live() ? consumers(live()!, { cropped: alreadyCropped(), limit: contextLimit(), system: systemParts() }) : []))
   /** Buckets plus the entries of every expanded one, flattened so ↑↓ walks both. */
   type ConsumerLine = { bucket: Consumer; entry?: ConsumerEntry }
   const consumerLines = createMemo((): ConsumerLine[] =>
@@ -850,6 +858,21 @@ export function TreeRoute(props: TreeRouteProps) {
   }
 
   function copySelected() {
+    // in the consumers panel `y` copies the selected entry — the only way to read a system
+    // part in full, since it is not a message and has no row of its own
+    if (panel() === "consumers") {
+      const line = consumerLine()
+      const part = line?.entry && line.bucket.kind === "system" ? systemParts()?.find((p) => line.entry!.preview.startsWith(`${p.name}:`)) : undefined
+      const text = part?.text ?? line?.entry?.preview ?? ""
+      if (!text) return
+      try {
+        const { hint } = copyText(api, text, directory)
+        notify(`copied ${text.length} chars → ${hint}`)
+      } catch (e) {
+        notify(`copy failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      return
+    }
     const row = current()
     if (!row || row.kind === "branch" || row.kind === "separator") return
     const tr = row.sessionID === sessionID ? live() : others()[row.sessionID]
@@ -1370,7 +1393,7 @@ export function TreeRoute(props: TreeRouteProps) {
       { name: "ctree.inspector_up", hidden: true, enabled: inspectorOpen, run: () => scrollInspector(-1) },
       { name: "ctree.inspector_down", hidden: true, enabled: inspectorOpen, run: () => scrollInspector(1) },
       { name: "ctree.consumers", hidden: true, enabled: () => !inCrop(), run: () => setPanel(panel() === "consumers" ? "tree" : "consumers") },
-      { name: "ctree.copy", hidden: true, enabled: treeIdle, run: () => copySelected() },
+      { name: "ctree.copy", hidden: true, enabled: () => treeIdle() || panel() === "consumers", run: () => copySelected() },
       { name: "ctree.mode_duration", hidden: true, enabled: treePanel, run: () => setLane("duration") },
       { name: "ctree.mode_turns", hidden: true, enabled: treePanel, run: () => setLane("turns") },
       { name: "ctree.lanes_off", hidden: true, enabled: treePanel, run: () => { setLanesOn(false); api.kv.set("ctree.lanesOn", false) } },

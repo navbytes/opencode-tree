@@ -23,6 +23,43 @@ import { cacheShare, contextSizeOf, formatK, type MinimalMessage as MinimalToken
 import { parseForkTitle } from "../core/adopt.js"
 import { adoptNativeForks } from "../shared/adopt.js"
 
+/**
+ * Name the parts of an unlabelled system prompt so the consumers view can say *which* part
+ * costs what — "my AGENTS.md is 4k" is a lever the user can actually pull, where OpenCode's
+ * base prompt is not.
+ *
+ * The heuristics are deliberately shallow and never throw: an unrecognised part is "system
+ * prompt" plus its index, which is still worth counting.
+ */
+function nameSystemPart(text: string, index: number): string {
+  const head = text.slice(0, 400).toLowerCase()
+  if (head.includes("agents.md")) return "AGENTS.md"
+  if (head.includes("claude.md")) return "CLAUDE.md"
+  if (/\bcontext notes:/.test(head)) return "context-tree note"
+  if (head.includes("<env>") || head.includes("working directory")) return "environment"
+  if (head.includes("today's date") || head.includes("current date")) return "date"
+  return index === 0 ? "base prompt" : `system prompt ${index + 1}`
+}
+
+/**
+ * Record the system parts for a session. Best effort in every direction: if the host ever hands
+ * us an empty array (we append to it, so it arrives carrying OpenCode's own parts — the debug
+ * line below is how to confirm that on a live server), nothing is written and every reader
+ * treats the absence as "unknown", never as "zero".
+ */
+function captureSystem(store: JournalStore, sessionID: string, system: readonly string[]): void {
+  try {
+    const parts = system
+      .map((text, i) => ({ name: nameSystemPart(text, i), chars: text.length, text }))
+      .filter((p) => p.chars > 0)
+    debug("system.captured", { sessionID, parts: parts.length, chars: parts.reduce((n, p) => n + p.chars, 0) })
+    if (parts.length === 0) return
+    store.writeSystem(sessionID, { v: 1, ts: Date.now(), parts })
+  } catch (e) {
+    debug("system.capture.failed", { error: e instanceof Error ? e.message : String(e) })
+  }
+}
+
 export const server: Plugin = async ({ worktree, client, directory }, options) => {
   // same option parsing as the TUI half, so both write to the same place (docs/USAGE.md)
   const mode: StorageMode = options?.["storage"] === "global" ? "global" : "local"
@@ -255,9 +292,15 @@ export const server: Plugin = async ({ worktree, client, directory }, options) =
       )
     },
 
-    // DESIGN.md §6.8: a system note so the model reads ◆ / ✂ markers correctly
+    // DESIGN.md §6.8: a system note so the model reads ◆ / ✂ markers correctly, and §7.4:
+    // this is the one place the plugin can see what the provider is really sent as its system
+    // prompt, so it is also where the consumers view gets the bucket it was missing.
     "experimental.chat.system.transform": async ({ sessionID }, output) => {
       if (!sessionID || !(await journal).stateForSession(sessionID)) return
+      // snapshot what OpenCode assembled, BEFORE our own note joins it — the note is ours, and
+      // counting it as part of the user's prompt would be a small lie in the one view that
+      // exists to say where the context went
+      captureSystem(await journal, sessionID, output.system)
       output.system.push(
         "Context notes: messages starting with ◆ are decision records confirmed by the user — treat them as settled facts. Tool results reading [cropped: …] or turns reading [dropped turn …] were removed from your context on purpose to save space; if you need one back, ask the user to restore it (they can with /undo in the context tree).",
       )

@@ -111,7 +111,7 @@ appended to the trunk as a normal message.*
 | `c` `space` `a` `t` `⏎` | crop mode: mark (`space` alone enters it on a croppable row), auto-mark (≥10k tokens, older than 2 turns), result⇄turn, apply |
 | `u` (`x`) | undo |
 | `D` `E` | decisions panel, export `ctree-decisions.md` |
-| `s` | consumers: what is filling the context (`⏎` opens a bucket, `space` marks one entry for crop) |
+| `s` | consumers: what is filling the context (`⏎` opens a bucket, `space` marks one entry for crop, `y` copies one). Includes a `≡ system prompt` bucket broken down by part (base prompt, `AGENTS.md`, …) once the plugin has seen one request for the session — it is not croppable, but it is counted, so the total reconciles with the `ctx …` gauge |
 | `i` | inspector pane on/off (auto-hidden under 110 columns) |
 | `i` `I` `PgUp` `PgDn` | inspector in the side pane / full screen; page through a long payload or result. The pane shows every line it has, sized to your terminal, with `12–40 of 118` at the foot when there is more; `y` copies the untruncated text. Below 110 columns the side pane does not fit, so `i` opens full screen directly |
 | `1 2` `0` | timeline lanes, x-axis by duration / one cell per event; `0` off. `│` marks a turn boundary, and the lanes show whatever the `f` filter shows — so `f` → `tools-only` is the "what did I run" view in both the rows and the lanes |

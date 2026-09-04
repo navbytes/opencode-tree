@@ -131,6 +131,28 @@ export type JournalEntry = z.infer<typeof JournalEntrySchema>
 export type JournalEntryType = JournalEntry["type"]
 
 /** Parse one JSONL line into a validated journal entry, or `undefined` if it is malformed. */
+/**
+ * What the provider is actually sent as its system prompt, captured by the server half in
+ * `experimental.chat.system.transform` (DESIGN.md §7.4). It is *not* a journal entry: it has
+ * no history, it is not a mutation the user made, and `/undo` has nothing to do with it — the
+ * store keeps it in its own per-session file, overwritten each request.
+ */
+export const SystemPart = z.object({
+  /** A name for the part, guessed from its own text — providers hand us an unlabelled array. */
+  name: z.string(),
+  chars: z.number(),
+  text: z.string(),
+})
+export type SystemPart = z.infer<typeof SystemPart>
+
+export const SystemSnapshot = z.object({
+  v: z.literal(1),
+  /** When the provider was last sent this; the prompt can change between requests. */
+  ts: z.number(),
+  parts: z.array(SystemPart),
+})
+export type SystemSnapshot = z.infer<typeof SystemSnapshot>
+
 export function parseJournalLine(line: string): JournalEntry | undefined {
   const trimmed = line.trim()
   if (!trimmed) return undefined

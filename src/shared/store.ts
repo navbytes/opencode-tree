@@ -7,7 +7,7 @@
  */
 import fs from "node:fs"
 import path from "node:path"
-import { foldJournal, parseJournal, type JournalActor, type JournalEntry, type TreeState } from "../core/journal.js"
+import { foldJournal, parseJournal, SystemSnapshot, type JournalActor, type JournalEntry, type TreeState } from "../core/journal.js"
 
 export type StorageMode = "local" | "global"
 
@@ -52,6 +52,36 @@ export class JournalStore {
     fs.mkdirSync(this.baseDir, { recursive: true })
     const gitignorePath = path.join(this.baseDir, ".gitignore")
     if (!fs.existsSync(gitignorePath)) fs.writeFileSync(gitignorePath, "*\n")
+  }
+
+  /**
+   * Where a session's system-prompt snapshot lives. One file per session, **overwritten** each
+   * request rather than appended: it is the current state of something outside the message
+   * tree, not a mutation with history, so it must not grow the way the journal does.
+   */
+  private systemPath(sessionID: string): string {
+    return path.join(this.baseDir, `system-${sessionID}.json`)
+  }
+
+  /** Record the system parts the provider is actually being sent (server half, at request
+   *  time). Best effort: a session whose prompt we never see simply has no snapshot, and every
+   *  reader treats that as "unknown" rather than "zero". */
+  writeSystem(sessionID: string, snapshot: SystemSnapshot): void {
+    this.ensureDir()
+    const tmp = `${this.systemPath(sessionID)}.${process.pid}.${Date.now()}.tmp`
+    fs.writeFileSync(tmp, `${JSON.stringify(snapshot, null, 2)}\n`)
+    fs.renameSync(tmp, this.systemPath(sessionID))
+  }
+
+  /** The last snapshot for a session, or undefined when we have never seen its prompt. */
+  readSystem(sessionID: string): SystemSnapshot | undefined {
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.systemPath(sessionID), "utf8")) as unknown
+      const parsed = SystemSnapshot.safeParse(raw)
+      return parsed.success ? parsed.data : undefined
+    } catch {
+      return undefined
+    }
   }
 
   private journalPath(treeId: string): string {

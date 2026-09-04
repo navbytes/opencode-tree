@@ -17,7 +17,7 @@ export type ConsumerEntry = {
 
 export type Consumer = {
   source: string
-  kind: "tool" | "assistant" | "user" | "decision" | "summary" | "reasoning"
+  kind: "tool" | "assistant" | "user" | "decision" | "summary" | "reasoning" | "system"
   tokens: number
   count: number
   /** share of this transcript's own total */
@@ -32,8 +32,22 @@ export type Consumer = {
 
 const THINKING = "(thinking)"
 const THINKING_NOTE = "provider reasoning · not croppable"
+const SYSTEM = "≡ system prompt"
+const SYSTEM_NOTE = "sent whole every request · not croppable (y copies a part)"
 
-export function consumers(transcript: Transcript, opts: { cropped?: Set<string>; limit?: number } = {}): Consumer[] {
+export function consumers(
+  transcript: Transcript,
+  opts: {
+    cropped?: Set<string>
+    limit?: number
+    /**
+     * The system parts the provider is really sent, captured by the server half. Without it
+     * this view silently omits them, and its total cannot be reconciled with the `ctx …` gauge
+     * — which reads `tokens.input` and so *does* include them (DESIGN.md §7.4).
+     */
+    system?: { name: string; text: string }[]
+  } = {},
+): Consumer[] {
   const acc = new Map<string, Consumer>()
   const add = (source: string, kind: Consumer["kind"], tokens: number, message: TranscriptMessage, part: StepPart) => {
     const c = acc.get(source) ?? { source, kind, tokens: 0, count: 0, share: 0, entries: [] }
@@ -62,6 +76,16 @@ export function consumers(transcript: Transcript, opts: { cropped?: Set<string>;
       } else if (p.type === "reasoning") add(THINKING, "reasoning", estimateTokens(p.text ?? ""), m, p)
     }
   }
+  // one bucket, one entry per part, so "AGENTS.md is 4k" is visible next to "bash is 30k"
+  for (const part of opts.system ?? []) {
+    const c = acc.get(SYSTEM) ?? { source: SYSTEM, kind: "system" as const, tokens: 0, count: 0, share: 0, entries: [] }
+    const tokens = estimateTokens(part.text)
+    c.tokens += tokens
+    c.count += 1
+    c.entries.push({ messageID: "", tokens, preview: `${part.name}: ${part.text.slice(0, 120).replace(/\s+/g, " ").trim()}`, croppable: false })
+    acc.set(SYSTEM, c)
+  }
+
   const total = [...acc.values()].reduce((s, c) => s + c.tokens, 0) || 1
   const limit = opts.limit !== undefined && opts.limit > 0 ? opts.limit : undefined
   return [...acc.values()]
@@ -69,7 +93,7 @@ export function consumers(transcript: Transcript, opts: { cropped?: Set<string>;
       ...c,
       share: c.tokens / total,
       ...(limit === undefined ? {} : { shareOfWindow: c.tokens / limit }),
-      ...(c.kind === "reasoning" ? { note: THINKING_NOTE } : {}),
+      ...(c.kind === "reasoning" ? { note: THINKING_NOTE } : c.kind === "system" ? { note: SYSTEM_NOTE } : {}),
       entries: c.entries.sort((a, b) => b.tokens - a.tokens),
     }))
     .sort((a, b) => b.tokens - a.tokens)

@@ -28,6 +28,43 @@ describe("consumers", () => {
   })
 })
 
+  test("the system prompt is a bucket, so the view reconciles with the ctx gauge", () => {
+    // without it this view walks the transcript only, and silently omits a chunk the header's
+    // `ctx …` (tokens.input) does include
+    const system = [
+      { name: "base prompt", text: "x".repeat(8000) },
+      { name: "AGENTS.md", text: "y".repeat(4000) },
+    ]
+    const withSystem = consumers(open, { system })
+    const without = consumers(open)
+    const bucket = withSystem.find((c) => c.kind === "system")!
+    expect(bucket.source).toBe("≡ system prompt")
+    expect(bucket.tokens).toBe(3000) // (8000 + 4000) / 4
+    expect(bucket.count).toBe(2)
+    expect(withSystem.reduce((n, c) => n + c.tokens, 0)).toBe(without.reduce((n, c) => n + c.tokens, 0) + 3000)
+  })
+
+  test("its parts are separate entries, biggest first, and none is croppable", () => {
+    const system = [
+      { name: "base prompt", text: "x".repeat(400) },
+      { name: "AGENTS.md", text: "y".repeat(4000) },
+    ]
+    const bucket = consumers(open, { system }).find((c) => c.kind === "system")!
+    expect(bucket.entries.map((e) => e.preview.split(":")[0])).toEqual(["AGENTS.md", "base prompt"])
+    expect(bucket.entries.every((e) => !e.croppable)).toBe(true)
+    expect(bucket.note).toContain("not croppable")
+  })
+
+  test("no snapshot means no bucket — absent is 'unknown', never 'zero'", () => {
+    expect(consumers(open).some((c) => c.kind === "system")).toBe(false)
+    expect(consumers(open, { system: [] }).some((c) => c.kind === "system")).toBe(false)
+  })
+
+  test("shares still sum to 1 once the system prompt is in", () => {
+    const cs = consumers(open, { system: [{ name: "base prompt", text: "x".repeat(8000) }] })
+    expect(cs.reduce((n, c) => n + c.share, 0)).toBeCloseTo(1, 5)
+  })
+
 const T = (messages: TranscriptMessage[]): Transcript => ({ sessionID: "s", title: "strip", status: "available", messages })
 
 /** cells that belong to any lane, per index — the axis is shared, so this must never exceed 1 */

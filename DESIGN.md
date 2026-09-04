@@ -635,6 +635,31 @@ Three changes, in the order they matter:
 `y` stays the answer for actually *reading* a large payload — copy it somewhere with search and
 folding. The scroller is for "there were twelve more lines and I want to glance at them".
 
+**The system prompt (0.2.4).** Consumers walked the transcript only, so it omitted the system
+prompt and its total could not be reconciled with the `ctx …` gauge above it — which reads
+`tokens.input` and therefore *does* include it. On an agent with a large base prompt and an
+`AGENTS.md` that is a silently missing 5–15k in the one view whose job is "where did my window
+go".
+
+`experimental.chat.system.transform` is the only place the plugin can see it. The server half
+snapshots `output.system` there **before pushing its own note** (counting our note as part of
+the user's prompt would be a small lie in exactly the wrong view), names each part by a shallow
+text heuristic (`AGENTS.md`, `CLAUDE.md`, `environment`, …, else `base prompt`), and writes it
+to `system-<sessionID>.json` — *overwritten* each request, not appended: it is current state
+outside the message tree, not a mutation with history, so `/undo` has nothing to do with it and
+it must not grow the way the journal does. The TUI reads it on the same poll as the tree.
+
+It appears as one `≡ system prompt` bucket with an entry per part, `croppable: false` and the
+note `sent whole every request · not croppable (y copies a part)` — the same mechanism
+`(thinking)` already uses. `y` in the consumers panel copies the selected part in full, which is
+the only way to read one: it is not a message, so it has no row and no inspector of its own.
+
+Two honest limits. It is mostly *diagnostic* — OpenCode's base prompt cannot be cropped, though
+`AGENTS.md` being 4k is a lever the user owns. And absence means **unknown**, never zero: a
+session whose prompt we have not seen yet simply has no bucket, rather than reporting 0.
+Tool-definition schemas are still uncounted; `client.tool.list` gives their descriptions but not
+what the provider is really sent, so that estimate would be rough enough to mislead.
+
 ### 7.5 Filters and search (from Pi)
 
 `f` cycles `default → no-tools → user-only → labeled → all` (default hides
