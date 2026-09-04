@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { eventAllowed, layoutEventStrip, overviewTrack, stripIndexFor, windowFor, type EventLayout } from "../src/core/lanes.js"
+import { eventAllowed, laneLabel, laneModeLine, laneSuffix, layoutEventStrip, overviewTrack, stripIndexFor, windowFor, type EventLayout, LANE_CHROME, LANE_LABEL_WIDTH } from "../src/core/lanes.js"
 import { bar, consumers } from "../src/core/consumers.js"
 import type { Transcript, TranscriptMessage } from "../src/core/transcript.js"
 import { assistant, buildFixture, OPEN, user } from "./fixtures/tree.js"
@@ -217,5 +217,30 @@ describe("overview track", () => {
     const track = overviewTrack(withError, withError.totalWidth - 20, 20)
     expect(track[0]).toBe("error")
     expect(track.at(-1)).toBe("window")
+  })
+})
+
+describe("lane chrome", () => {
+  test("the mode line is the same width whichever mode is selected", () => {
+    // the strip is sized as "the terminal minus the chrome", so a mode line that changed width
+    // with the selection would shift every pill sideways on `1`/`2`
+    expect(laneModeLine("turns").length).toBe(laneModeLine("duration").length)
+  })
+
+  test("the label column is fixed width, cue or no cue, longest lane name or shortest", () => {
+    for (const name of ["Input", "Model", "Tools"]) {
+      expect(laneLabel(name).length).toBe(LANE_LABEL_WIDTH)
+      expect(laneLabel(name, "…999").length).toBe(LANE_LABEL_WIDTH)
+    }
+  })
+
+  test("the suffix is fixed width, cue or no cue", () => {
+    expect(laneSuffix("", "turns").length).toBe(laneSuffix("999…", "duration").length)
+  })
+
+  test("LANE_CHROME is what a lane row actually spends off-strip", () => {
+    // measured, never written down: the old reserve was a literal 61 and stayed 61 when the
+    // "3 calls" mode went away, so the strip stopped ~10 columns short of the right edge
+    expect(LANE_CHROME).toBe(laneLabel("Input", "…999").length + laneSuffix("999…", "turns").length)
   })
 })

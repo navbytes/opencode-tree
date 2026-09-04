@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- The timeline lanes fill the terminal, ending on the same column as the rows and the status
+  line. They were capped at 80 cells and reserved a hardcoded 61 columns for the label and the
+  mode legend that actually print 49, so a 200-column terminal left ~71 blank columns to the
+  right of the strip and even a 130-column one left 16. The reserve is now derived from the
+  strings themselves (`core/lanes.ts#LANE_CHROME`), so shortening the mode legend widens the
+  strip instead of leaving a gap — which is what went wrong when the "3 calls" mode was
+  removed and the 61 stayed 61. A wider strip shows more events before scrolling, and the
+  overview track already hides itself once nothing is off-screen.
+
 ## 0.2.3 — 2026-09-04
 
 - **The inspector shows the whole field now, and pages through it.** It used to cap each field

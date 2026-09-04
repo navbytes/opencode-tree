@@ -643,6 +643,16 @@ labeled shows only `L`-labelled rows). `/` filters rows incrementally by role, t
 name, label, and text — every token must match, like Pi. Folding state resets on
 filter change (as in Pi) and is otherwise remembered per session in `api.kv`.
 
+**Lane width (0.2.4).** The strip is `width() + 2 - LANE_CHROME`: the terminal, minus the
+12-column lane label and the mode legend, plus the two columns a row spends on its `│ ` prefix
+*outside* its own width (a lane label carries its own), so all three lane rows end on the same
+column as the rows and the status line. `LANE_CHROME` is *measured* from the label and legend
+strings in `core/lanes.ts`, never written down — it was a literal `61` against a legend that
+printed 49, and it stayed `61` when dropping the "Calls" mode made the legend shorter still.
+There is no ceiling on the strip: it is a window onto an unbounded layout, so more cells is
+more events visible and less scrolling, and `laneOverview` hides the overview track once
+nothing is off-screen.
+
 ### 7.6 Narrow terminals
 
 Below 110 columns the inspector is hidden and `i` opens it full-screen; below 80 the
