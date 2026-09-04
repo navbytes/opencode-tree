@@ -24,6 +24,15 @@ function unwrap<T>(res: { data?: T; error?: unknown }): T {
   return res.data
 }
 
+/** Every system message the provider was sent, joined — `output.system` parts may arrive as
+ *  separate messages or as one, and structured content is stringified rather than assumed. */
+function systemText(req: { body: { messages: { role: string; content: unknown }[] } }): string {
+  return req.body.messages
+    .filter((m) => m.role === "system")
+    .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
+    .join("\n")
+}
+
 async function installSpikePlugin(projectDir: string): Promise<void> {
   const pluginsDir = path.join(projectDir, ".opencode", "plugins")
   await mkdir(pluginsDir, { recursive: true })
@@ -310,6 +319,27 @@ describe.skipIf(!e2e)("server e2e: built plugin headless /ctree commands", () =>
     // no path -> the documented default, relative to the project directory
     unwrap(await server.client.session.command({ path: { id: session.id }, query: { directory: server.dir }, body: { command: "ctree", arguments: "decisions --export" } }))
     expect(readFileSync(path.join(server.dir, "ctree-decisions.md"), "utf8")).toContain("# Decisions")
+  }, 180_000)
+
+  // DESIGN.md §6.8. `applyCrops` ships `[cropped: …]` stubs and `◆` records to the model; this
+  // note is the only thing that tells it how to read them, and nothing proved the note survived
+  // `experimental.chat.system.transform` into the actual provider request. It is gated on tree
+  // membership, so a plain session legitimately has none — branch first, then look.
+  test("the ◆/crop system note reaches the provider once the session is in a tree", async () => {
+    const session = unwrap(await server.client.session.create({ query: { directory: server.dir }, body: { title: "system-note" } }))
+
+    mock.clearRequests()
+    unwrap(await server.client.session.prompt({ path: { id: session.id }, query: { directory: server.dir }, body: { parts: [{ type: "text", text: "seed turn" }] } }))
+    expect(systemText(mock.requests().at(-1)!)).not.toContain("Context notes:")
+
+    unwrap(await server.client.session.command({ path: { id: session.id }, query: { directory: server.dir }, body: { command: "ctree", arguments: "branch note-check mock/mock-b" } }))
+
+    mock.clearRequests()
+    unwrap(await server.client.session.prompt({ path: { id: session.id }, query: { directory: server.dir }, body: { parts: [{ type: "text", text: "second turn" }] } }))
+    const sys = systemText(mock.requests().at(-1)!)
+    expect(sys).toContain("Context notes:")
+    // and it is appended to OpenCode's own prompt, not sent instead of it
+    expect(sys.length).toBeGreaterThan(500)
   }, 180_000)
 
   test("a native session.fork (no plugin command) is adopted into the tree", async () => {

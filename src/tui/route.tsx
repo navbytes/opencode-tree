@@ -16,7 +16,7 @@ import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
 import { applyCrop, branchLabel, BRANCH_DIALOG, clip as clipTo, copyText, createNamedBranch, describeTail, executeJump, executeUndo, jumpDialogOptions, jumpDialogTitle, mergeBranch, mergeDialogOptions, mergeDialogTitle, mergePickerFigures, MERGE_TRUST, setLabel, UNDO_KEY, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
 import { decisionSummary, exportDecisions, renderDecision } from "../core/decision.js"
-import { layoutEventStrip, overviewTrack, stripIndexFor, windowFor, type LaneMode, type StripCell } from "../core/lanes.js"
+import { laneLabel, laneSuffix, layoutEventStrip, overviewTrack, stripIndexFor, windowFor, LANE_CHROME, type LaneMode, type StripCell } from "../core/lanes.js"
 import { bar, consumers, type Consumer, type ConsumerEntry } from "../core/consumers.js"
 import { hasEditor } from "./editor.js"
 import fs from "node:fs"
@@ -410,8 +410,12 @@ export function TreeRoute(props: TreeRouteProps) {
   const helpHeight = () => (panel() === "help" ? Math.min(HELP.length, Math.max(0, size().rows - 12)) : 0)
   const width = () => Math.max(60, cols() - 4)
   // ---- lane geometry (the lanes themselves are further down) ----------------
-  // 61 = the 12-cell label column + the `N…` cue + the mode legend that follows the Input lane
-  const laneWidth = () => Math.max(10, Math.min(width() - 61, 80))
+  /** The strip fills the terminal, ending on the same column as the rows and the status line.
+   *  The `+ 2` is the `│ ` a row draws *outside* its own width — a lane label carries its own,
+   *  so those two columns come back to the strip. No ceiling: the strip is a window onto an
+   *  unbounded layout, so more cells is more events visible and less scrolling, and the
+   *  overview track hides itself once nothing is off-screen (`laneOverview`). */
+  const laneWidth = () => Math.max(10, width() + 2 - LANE_CHROME)
   const layout = createMemo(() => layoutEventStrip(live() ?? EMPTY_TRANSCRIPT, laneMode(), filter()))
   /** DESIGN.md §7.6: below 80 columns the strip is the Input lane alone. */
   const showAllLanes = () => cols() >= 80
@@ -615,8 +619,6 @@ export function TreeRoute(props: TreeRouteProps) {
   const laneOffset = () => laneStart() ?? Math.max(0, layout().totalWidth - laneWidth())
   const hiddenLeft = createMemo(() => layout().spans.filter((s) => s.end <= laneOffset()).length)
   const hiddenRight = createMemo(() => layout().spans.filter((s) => s.start >= laneOffset() + laneWidth()).length)
-  /** `│ Input …12 `: one fixed-width column, so the lanes stay aligned whatever the cues say. */
-  const laneLabel = (name: string, cue = "") => `│ ${name} ${cue}`.padEnd(12)
   const laneCue = (n: number) => (n > 999 ? "999" : String(n))
   const cellColor = (cell: StripCell): unknown => {
     if (cell.error) return t.error
@@ -794,7 +796,17 @@ export function TreeRoute(props: TreeRouteProps) {
   createEffect(on(() => `${current()?.id ?? ""}:${showInspectorFull()}`, () => setInspectorTop(0)))
 
   // ---- consumers -------------------------------------------------------------
-  const consumerRows = createMemo(() => (live() ? consumers(live()!, { cropped: alreadyCropped(), limit: contextLimit() }) : []))
+  /** The system parts the server half captured for this session, if it has seen a request yet.
+   *  Absent means "we have not seen this session's prompt", never "it costs nothing", so the
+   *  bucket simply does not appear rather than reporting a misleading zero. */
+  const systemParts = createMemo(() => {
+    tick() // the server half rewrites the snapshot on each request; follow the same poll the tree does
+    // only the consumers panel reads this, and the memo is eager: without the gate every poll
+    // tick pays a readFileSync — a thrown-and-caught ENOENT, in the common no-snapshot case
+    if (!sessionID || panel() !== "consumers") return undefined
+    return store.readSystem(sessionID)?.parts
+  })
+  const consumerRows = createMemo(() => (live() ? consumers(live()!, { cropped: alreadyCropped(), limit: contextLimit(), system: systemParts() }) : []))
   /** Buckets plus the entries of every expanded one, flattened so ↑↓ walks both. */
   type ConsumerLine = { bucket: Consumer; entry?: ConsumerEntry }
   const consumerLines = createMemo((): ConsumerLine[] =>
@@ -848,6 +860,22 @@ export function TreeRoute(props: TreeRouteProps) {
   }
 
   function copySelected() {
+    // in the consumers panel `y` copies the selected entry — the only way to read a system
+    // part in full, since it is not a message and has no row of its own
+    if (panel() === "consumers") {
+      const line = consumerLine()
+      const idx = line?.bucket.kind === "system" ? line.entry?.systemIndex : undefined
+      const part = idx === undefined ? undefined : systemParts()?.[idx]
+      const text = part?.text ?? line?.entry?.preview ?? ""
+      if (!text) return
+      try {
+        const { hint } = copyText(api, text, directory)
+        notify(`copied ${text.length} chars → ${hint}`)
+      } catch (e) {
+        notify(`copy failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      return
+    }
     const row = current()
     if (!row || row.kind === "branch" || row.kind === "separator") return
     const tr = row.sessionID === sessionID ? live() : others()[row.sessionID]
@@ -1368,7 +1396,7 @@ export function TreeRoute(props: TreeRouteProps) {
       { name: "ctree.inspector_up", hidden: true, enabled: inspectorOpen, run: () => scrollInspector(-1) },
       { name: "ctree.inspector_down", hidden: true, enabled: inspectorOpen, run: () => scrollInspector(1) },
       { name: "ctree.consumers", hidden: true, enabled: () => !inCrop(), run: () => setPanel(panel() === "consumers" ? "tree" : "consumers") },
-      { name: "ctree.copy", hidden: true, enabled: treeIdle, run: () => copySelected() },
+      { name: "ctree.copy", hidden: true, enabled: () => treeIdle() || panel() === "consumers", run: () => copySelected() },
       { name: "ctree.mode_duration", hidden: true, enabled: treePanel, run: () => setLane("duration") },
       { name: "ctree.mode_turns", hidden: true, enabled: treePanel, run: () => setLane("turns") },
       { name: "ctree.lanes_off", hidden: true, enabled: treePanel, run: () => { setLanesOn(false); api.kv.set("ctree.lanesOn", false) } },
@@ -1518,7 +1546,7 @@ export function TreeRoute(props: TreeRouteProps) {
           <Show when={!layout().empty.input} fallback={<text fg={t.textMuted}>{"no input".padEnd(laneWidth())}</text>}>
             <For each={inputRuns()}>{(r) => <text fg={r.fg as never} bg={r.bg as never}>{r.text}</text>}</For>
           </Show>
-          <text fg={t.textMuted}>{`${(hiddenRight() > 0 ? `${laneCue(hiddenRight())}…` : "").padStart(4).padEnd(5)}${laneMode() === "duration" ? "[1] Duration" : " 1  duration"} · ${laneMode() === "turns" ? "[2] Turns" : " 2  turns"} · 0 off`}</text>
+          <text fg={t.textMuted}>{laneSuffix(hiddenRight() > 0 ? `${laneCue(hiddenRight())}…` : "", laneMode())}</text>
         </box>
         <Show when={showAllLanes()}>
           <box flexDirection="row">

@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- Consumers (`s`) counts the **system prompt**. It walked the transcript only, so its total
+  could never be reconciled with the `ctx …` gauge two lines above it, which reads
+  `tokens.input` and does include the system prompt — a silently missing 5–15k on an agent with
+  a large base prompt and an `AGENTS.md`. The server half now snapshots what the provider is
+  really sent (in `experimental.chat.system.transform`, before adding its own note) and the view
+  shows a `≡ system prompt` bucket with one entry per part — base prompt, `AGENTS.md`,
+  environment — so you can see that your rules file costs 4k. It is not croppable, and `y`
+  copies a part in full. A session whose prompt the plugin has not seen yet shows no bucket
+  rather than a misleading zero.
+
+- The timeline lanes fill the terminal, ending on the same column as the rows and the status
+  line. They were capped at 80 cells and reserved a hardcoded 61 columns for the label and the
+  mode legend that actually print 49, so a 200-column terminal left ~71 blank columns to the
+  right of the strip and even a 130-column one left 16. The reserve is now derived from the
+  strings themselves (`core/lanes.ts#LANE_CHROME`), so shortening the mode legend widens the
+  strip instead of leaving a gap — which is what went wrong when the "3 calls" mode was
+  removed and the 61 stayed 61. A wider strip shows more events before scrolling, and the
+  overview track already hides itself once nothing is off-screen.
+
 ## 0.2.3 — 2026-09-04
 
 - **The inspector shows the whole field now, and pages through it.** It used to cap each field

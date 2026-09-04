@@ -101,3 +101,36 @@ describe("JournalStore registry", () => {
     expect(store.stateFor(treeId).labels["msg_1"]?.label).toBe("x")
   })
 })
+
+describe("system prompt snapshot", () => {
+  const store = () => new JournalStore({ worktree: fs.mkdtempSync(path.join(os.tmpdir(), "ctree-sys-")) })
+
+  test("round-trips, and is overwritten rather than appended", () => {
+    const s = store()
+    s.writeSystem("ses_a", { v: 1, ts: 1, parts: [{ name: "base prompt", chars: 3, text: "abc" }] })
+    s.writeSystem("ses_a", { v: 1, ts: 2, parts: [{ name: "AGENTS.md", chars: 2, text: "hi" }] })
+    // the prompt changes between requests and has no history: the file must not grow
+    expect(s.readSystem("ses_a")).toEqual({ v: 1, ts: 2, parts: [{ name: "AGENTS.md", chars: 2, text: "hi" }] })
+  })
+
+  test("a session we have never seen a request for reads as undefined, not empty", () => {
+    expect(store().readSystem("ses_never")).toBeUndefined()
+  })
+
+  test("a corrupt or foreign file reads as undefined instead of throwing", () => {
+    const s = store()
+    s.writeSystem("ses_b", { v: 1, ts: 1, parts: [] })
+    fs.writeFileSync(path.join(s.dir, "system-ses_b.json"), "{not json")
+    expect(s.readSystem("ses_b")).toBeUndefined()
+    fs.writeFileSync(path.join(s.dir, "system-ses_b.json"), JSON.stringify({ v: 2, ts: 1, parts: [] }))
+    expect(s.readSystem("ses_b")).toBeUndefined()
+  })
+
+  test("snapshots are per session and do not collide", () => {
+    const s = store()
+    s.writeSystem("ses_a", { v: 1, ts: 1, parts: [{ name: "base prompt", chars: 1, text: "a" }] })
+    s.writeSystem("ses_b", { v: 1, ts: 1, parts: [{ name: "base prompt", chars: 1, text: "b" }] })
+    expect(s.readSystem("ses_a")!.parts[0]!.text).toBe("a")
+    expect(s.readSystem("ses_b")!.parts[0]!.text).toBe("b")
+  })
+})

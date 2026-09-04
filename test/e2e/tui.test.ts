@@ -4,7 +4,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import path from "node:path"
-import { readFileSync, readdirSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { createProject, installPlugins, REPO_ROOT, runTui, runTuiScreens, startMock, type StartedMock } from "./harness.js"
 
 const e2e = process.env["CTREE_E2E"] === "1"
@@ -230,6 +230,56 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
       await proj.cleanup()
     }
   }, 320_000)
+
+  test("the server captures the real system prompt; consumers shows it as a bucket", async () => {
+    const m = await startMock({ tool: false })
+    const proj = await createProject({ mockPort: m.port })
+    await installPlugins({ projectDir: proj.dir, server: [path.join(REPO_ROOT, "dist", "server.js")], tui: [path.join(REPO_ROOT, "dist", "tui.js")] })
+    try {
+      const log = path.join(proj.dir, "ctree-debug.log")
+      const { screens } = await runTuiScreens({
+        projectDir: proj.dir,
+        env: { CTREE_DEBUG: log },
+        keys: [
+          // a plain session that never branches: the case the capture must not miss
+          ["Ask anything", 1, "hello\r"],
+          ["mock reply", 8, "/tree"],
+          ["Context tree", 0.5, "\r"],
+          ["Context tree ·", 2, "s"],
+          ["what's filling|consumers", 3, "\x03"],
+          ["", 1, "\x03"],
+        ],
+        timeoutSec: 180,
+        cols: 130,
+        rows: 34,
+        exitWhenDone: true,
+      })
+
+      // 1. the assumption the whole feature rests on: `output.system` arrives carrying
+      //    OpenCode's own parts, so there is something real to snapshot
+      const debugLog = existsSync(log) ? readFileSync(log, "utf8") : "(no debug log)"
+      const dir = path.join(proj.dir, ".opencode", "context-tree")
+      if (!existsSync(dir)) throw new Error(`no context-tree dir. debug log:\n${debugLog.split("\n").filter((l) => l.includes("system")).join("\n") || debugLog.slice(0, 2000)}`)
+      const snap = readdirSync(dir).find((f) => f.startsWith("system-") && f.endsWith(".json"))
+      expect(snap).toBeDefined()
+      const parsed = JSON.parse(readFileSync(path.join(dir, snap!), "utf8")) as { v: number; parts: { name: string; chars: number; text: string }[] }
+      expect(parsed.v).toBe(1)
+      expect(parsed.parts.length).toBeGreaterThan(0)
+      expect(parsed.parts.reduce((n, p) => n + p.chars, 0)).toBeGreaterThan(200)
+
+      // 2. our own note is NOT in the snapshot: it is captured before we push it
+      expect(parsed.parts.some((p) => p.text.startsWith("Context notes:"))).toBe(false)
+
+      // 3. and it reaches the consumers view. Assert against the pyte-rendered screen, not
+      //    the raw stream: the panel is painted cell-by-cell, so no label lands there whole.
+      const consumers = screens.find((s) => s.screen.includes("what's filling the context"))
+      if (!consumers) throw new Error(`consumers panel never rendered. screens: ${screens.map((s) => s.label).join(" | ")}`)
+      expect(consumers.screen).toContain("≡ system prompt")
+    } finally {
+      await m.stop()
+      await proj.cleanup()
+    }
+  }, 300_000)
 
   test("/tree opens the context tree route with rows and a context header", async () => {
     const text = await runTui({

@@ -42,6 +42,30 @@ function spanOf(m: TranscriptMessage): number {
  * tokens — `tokens` rides along only for the inspector.
  */
 
+/**
+ * Chrome around the strip on a lane row: the fixed-width label on the left and the mode line
+ * on the right. Both are fixed width *by construction* — `laneCue` caps at three digits, and
+ * each mode label is the same length selected or not — so the strip can be sized as
+ * "everything else" without measuring per frame.
+ *
+ * They live here, and `LANE_CHROME` is derived from them rather than written down, because the
+ * width was a literal `61` that stayed `61` when dropping the "3 calls" mode shortened the
+ * mode line: the strip quietly gave up ~10 columns and stopped short of the right edge.
+ */
+export const laneLabel = (name: string, cue = "") => `│ ${name} ${cue}`.padEnd(LANE_LABEL_WIDTH)
+export const LANE_LABEL_WIDTH = 12
+
+export function laneModeLine(mode: LaneMode): string {
+  return `${mode === "duration" ? "[1] Duration" : " 1  duration"} · ${mode === "turns" ? "[2] Turns" : " 2  turns"} · 0 off`
+}
+
+export function laneSuffix(cue: string, mode: LaneMode): string {
+  return `${cue.padStart(4).padEnd(5)}${laneModeLine(mode)}`
+}
+
+/** Columns a lane row spends on anything that is not the strip. */
+export const LANE_CHROME = LANE_LABEL_WIDTH + laneSuffix("", "turns").length
+
 export type LaneEvent = {
   lane: "input" | "model" | "tools"
   /** `context` = compaction/branch summary: machine-written context, not the human prompting */

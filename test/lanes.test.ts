@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { eventAllowed, layoutEventStrip, overviewTrack, stripIndexFor, windowFor, type EventLayout } from "../src/core/lanes.js"
+import { eventAllowed, laneLabel, laneModeLine, laneSuffix, layoutEventStrip, overviewTrack, stripIndexFor, windowFor, type EventLayout, LANE_CHROME, LANE_LABEL_WIDTH } from "../src/core/lanes.js"
 import { bar, consumers } from "../src/core/consumers.js"
 import type { Transcript, TranscriptMessage } from "../src/core/transcript.js"
 import { assistant, buildFixture, OPEN, user } from "./fixtures/tree.js"
@@ -25,6 +25,55 @@ describe("consumers", () => {
     expect(c[0]!.source).toBe("bash")
     expect(c[0]!.tokens).toBeLessThan(consumers(open)[0]!.tokens)
     expect(bar(0.5, 10)).toBe("▰▰▰▰▰▱▱▱▱▱")
+  })
+
+  test("the system prompt is a bucket, so the view reconciles with the ctx gauge", () => {
+    // without it this view walks the transcript only, and silently omits a chunk the header's
+    // `ctx …` (tokens.input) does include
+    const system = [
+      { name: "base prompt", text: "x".repeat(8000) },
+      { name: "AGENTS.md", text: "y".repeat(4000) },
+    ]
+    const withSystem = consumers(open, { system })
+    const without = consumers(open)
+    const bucket = withSystem.find((c) => c.kind === "system")!
+    expect(bucket.source).toBe("≡ system prompt")
+    expect(bucket.tokens).toBe(3000) // (8000 + 4000) / 4
+    expect(bucket.count).toBe(2)
+    expect(withSystem.reduce((n, c) => n + c.tokens, 0)).toBe(without.reduce((n, c) => n + c.tokens, 0) + 3000)
+  })
+
+  test("its parts are separate entries, biggest first, and none is croppable", () => {
+    const system = [
+      { name: "base prompt", text: "x".repeat(400) },
+      { name: "AGENTS.md", text: "y".repeat(4000) },
+    ]
+    const bucket = consumers(open, { system }).find((c) => c.kind === "system")!
+    expect(bucket.entries.map((e) => e.preview.split(":")[0])).toEqual(["AGENTS.md", "base prompt"])
+    expect(bucket.entries.every((e) => !e.croppable)).toBe(true)
+    expect(bucket.note).toContain("not croppable")
+  })
+
+  test("no snapshot means no bucket — absent is 'unknown', never 'zero'", () => {
+    expect(consumers(open).some((c) => c.kind === "system")).toBe(false)
+    expect(consumers(open, { system: [] }).some((c) => c.kind === "system")).toBe(false)
+  })
+
+  test("shares still sum to 1 once the system prompt is in", () => {
+    const cs = consumers(open, { system: [{ name: "base prompt", text: "x".repeat(8000) }] })
+    expect(cs.reduce((n, c) => n + c.share, 0)).toBeCloseTo(1, 5)
+  })
+
+  // names are a heuristic, so two parts can share one; `y` must still copy the part you picked
+  test("each system entry points at its own part, even when two share a name", () => {
+    const system = [
+      { name: "AGENTS.md", text: "global ".repeat(600) },
+      { name: "AGENTS.md", text: "project ".repeat(200) },
+    ]
+    const entries = consumers(open, { system }).find((c) => c.kind === "system")!.entries
+    expect(entries.map((e) => e.systemIndex)).toEqual([0, 1])
+    // sorted biggest-first, so the index must not be positional
+    expect(system[entries[0]!.systemIndex!]!.text.startsWith("global")).toBe(true)
   })
 })
 
@@ -217,5 +266,30 @@ describe("overview track", () => {
     const track = overviewTrack(withError, withError.totalWidth - 20, 20)
     expect(track[0]).toBe("error")
     expect(track.at(-1)).toBe("window")
+  })
+})
+
+describe("lane chrome", () => {
+  test("the mode line is the same width whichever mode is selected", () => {
+    // the strip is sized as "the terminal minus the chrome", so a mode line that changed width
+    // with the selection would shift every pill sideways on `1`/`2`
+    expect(laneModeLine("turns").length).toBe(laneModeLine("duration").length)
+  })
+
+  test("the label column is fixed width, cue or no cue, longest lane name or shortest", () => {
+    for (const name of ["Input", "Model", "Tools"]) {
+      expect(laneLabel(name).length).toBe(LANE_LABEL_WIDTH)
+      expect(laneLabel(name, "…999").length).toBe(LANE_LABEL_WIDTH)
+    }
+  })
+
+  test("the suffix is fixed width, cue or no cue", () => {
+    expect(laneSuffix("", "turns").length).toBe(laneSuffix("999…", "duration").length)
+  })
+
+  test("LANE_CHROME is what a lane row actually spends off-strip", () => {
+    // measured, never written down: the old reserve was a literal 61 and stayed 61 when the
+    // "3 calls" mode went away, so the strip stopped ~10 columns short of the right edge
+    expect(LANE_CHROME).toBe(laneLabel("Input", "…999").length + laneSuffix("999…", "turns").length)
   })
 })
