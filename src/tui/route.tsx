@@ -801,7 +801,9 @@ export function TreeRoute(props: TreeRouteProps) {
    *  bucket simply does not appear rather than reporting a misleading zero. */
   const systemParts = createMemo(() => {
     tick() // the server half rewrites the snapshot on each request; follow the same poll the tree does
-    if (!sessionID) return undefined
+    // only the consumers panel reads this, and the memo is eager: without the gate every poll
+    // tick pays a readFileSync — a thrown-and-caught ENOENT, in the common no-snapshot case
+    if (!sessionID || panel() !== "consumers") return undefined
     return store.readSystem(sessionID)?.parts
   })
   const consumerRows = createMemo(() => (live() ? consumers(live()!, { cropped: alreadyCropped(), limit: contextLimit(), system: systemParts() }) : []))
@@ -862,7 +864,8 @@ export function TreeRoute(props: TreeRouteProps) {
     // part in full, since it is not a message and has no row of its own
     if (panel() === "consumers") {
       const line = consumerLine()
-      const part = line?.entry && line.bucket.kind === "system" ? systemParts()?.find((p) => line.entry!.preview.startsWith(`${p.name}:`)) : undefined
+      const idx = line?.bucket.kind === "system" ? line.entry?.systemIndex : undefined
+      const part = idx === undefined ? undefined : systemParts()?.[idx]
       const text = part?.text ?? line?.entry?.preview ?? ""
       if (!text) return
       try {

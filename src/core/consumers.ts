@@ -13,6 +13,9 @@ export type ConsumerEntry = {
   preview: string
   /** only a completed tool result can be stubbed by crop's result mode (core/crop.ts) */
   croppable: boolean
+  /** system entries only: which captured part this is. Names are a heuristic and two parts can
+   *  share one (a global and a project `AGENTS.md`), so `y` must not find its text by name. */
+  systemIndex?: number
 }
 
 export type Consumer = {
@@ -77,12 +80,12 @@ export function consumers(
     }
   }
   // one bucket, one entry per part, so "AGENTS.md is 4k" is visible next to "bash is 30k"
-  for (const part of opts.system ?? []) {
+  for (const [i, part] of (opts.system ?? []).entries()) {
     const c = acc.get(SYSTEM) ?? { source: SYSTEM, kind: "system" as const, tokens: 0, count: 0, share: 0, entries: [] }
     const tokens = estimateTokens(part.text)
     c.tokens += tokens
     c.count += 1
-    c.entries.push({ messageID: "", tokens, preview: `${part.name}: ${part.text.slice(0, 120).replace(/\s+/g, " ").trim()}`, croppable: false })
+    c.entries.push({ messageID: "", tokens, preview: `${part.name}: ${part.text.slice(0, 120).replace(/\s+/g, " ").trim()}`, croppable: false, systemIndex: i })
     acc.set(SYSTEM, c)
   }
 

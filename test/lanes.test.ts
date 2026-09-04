@@ -26,7 +26,6 @@ describe("consumers", () => {
     expect(c[0]!.tokens).toBeLessThan(consumers(open)[0]!.tokens)
     expect(bar(0.5, 10)).toBe("▰▰▰▰▰▱▱▱▱▱")
   })
-})
 
   test("the system prompt is a bucket, so the view reconciles with the ctx gauge", () => {
     // without it this view walks the transcript only, and silently omits a chunk the header's
@@ -64,6 +63,19 @@ describe("consumers", () => {
     const cs = consumers(open, { system: [{ name: "base prompt", text: "x".repeat(8000) }] })
     expect(cs.reduce((n, c) => n + c.share, 0)).toBeCloseTo(1, 5)
   })
+
+  // names are a heuristic, so two parts can share one; `y` must still copy the part you picked
+  test("each system entry points at its own part, even when two share a name", () => {
+    const system = [
+      { name: "AGENTS.md", text: "global ".repeat(600) },
+      { name: "AGENTS.md", text: "project ".repeat(200) },
+    ]
+    const entries = consumers(open, { system }).find((c) => c.kind === "system")!.entries
+    expect(entries.map((e) => e.systemIndex)).toEqual([0, 1])
+    // sorted biggest-first, so the index must not be positional
+    expect(system[entries[0]!.systemIndex!]!.text.startsWith("global")).toBe(true)
+  })
+})
 
 const T = (messages: TranscriptMessage[]): Transcript => ({ sessionID: "s", title: "strip", status: "available", messages })
 

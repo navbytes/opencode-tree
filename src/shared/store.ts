@@ -60,6 +60,9 @@ export class JournalStore {
    * tree, not a mutation with history, so it must not grow the way the journal does.
    */
   private systemPath(sessionID: string): string {
+    // the id reaches us from the host and lands in a path we write: a `/` or `..` in it would
+    // escape baseDir, so anything but an id-shaped string is refused rather than sanitised
+    if (!/^[A-Za-z0-9_-]+$/.test(sessionID)) throw new Error(`refusing to use unsafe sessionID in a path: ${JSON.stringify(sessionID)}`)
     return path.join(this.baseDir, `system-${sessionID}.json`)
   }
 
@@ -69,7 +72,7 @@ export class JournalStore {
   writeSystem(sessionID: string, snapshot: SystemSnapshot): void {
     this.ensureDir()
     const tmp = `${this.systemPath(sessionID)}.${process.pid}.${Date.now()}.tmp`
-    fs.writeFileSync(tmp, `${JSON.stringify(snapshot, null, 2)}\n`)
+    fs.writeFileSync(tmp, `${JSON.stringify(snapshot)}\n`)
     fs.renameSync(tmp, this.systemPath(sessionID))
   }
 

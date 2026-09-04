@@ -6,6 +6,7 @@
  * messages OpenCode sends to the model, in place. Tree-shaping entries it does
  * not create itself (squash merges, labels, summaries) come from the TUI half.
  */
+import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import type { Plugin } from "@opencode-ai/plugin"
@@ -56,7 +57,10 @@ function captureSystem(store: JournalStore, sessionID: string, system: readonly 
     const parts = system
       .map((text, i) => ({ name: nameSystemPart(text, i), chars: text.length, text }))
       .filter((p) => p.chars > 0)
-    const shape = parts.map((p) => `${p.name}:${p.chars}`).join("|")
+    // hash the text, not just its length: the `<env>` part's date rolls 2026-09-04 → 2026-09-05
+    // without changing a single character count, and a length-only key would serve that stale
+    // text from disk for the life of the process.
+    const shape = crypto.createHash("sha1").update(parts.map((p) => `${p.name}\n${p.text}`).join("\n\n")).digest("hex")
     debug("system.captured", { sessionID, parts: parts.length, chars: parts.reduce((n, p) => n + p.chars, 0), unchanged: lastSystem.get(sessionID) === shape })
     if (parts.length === 0 || lastSystem.get(sessionID) === shape) return
     store.writeSystem(sessionID, { v: 1, ts: Date.now(), parts })

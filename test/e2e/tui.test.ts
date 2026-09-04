@@ -237,7 +237,7 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
     await installPlugins({ projectDir: proj.dir, server: [path.join(REPO_ROOT, "dist", "server.js")], tui: [path.join(REPO_ROOT, "dist", "tui.js")] })
     try {
       const log = path.join(proj.dir, "ctree-debug.log")
-      const text = await runTui({
+      const { screens } = await runTuiScreens({
         projectDir: proj.dir,
         env: { CTREE_DEBUG: log },
         keys: [
@@ -246,7 +246,7 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
           ["mock reply", 8, "/tree"],
           ["Context tree", 0.5, "\r"],
           ["Context tree ·", 2, "s"],
-          ["what is filling|system prompt|consumers", 3, "\x03"],
+          ["what's filling|consumers", 3, "\x03"],
           ["", 1, "\x03"],
         ],
         timeoutSec: 180,
@@ -270,8 +270,11 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
       // 2. our own note is NOT in the snapshot: it is captured before we push it
       expect(parsed.parts.some((p) => p.text.startsWith("Context notes:"))).toBe(false)
 
-      // 3. and it reaches the consumers view
-      expect(text).toContain("≡ system prompt")
+      // 3. and it reaches the consumers view. Assert against the pyte-rendered screen, not
+      //    the raw stream: the panel is painted cell-by-cell, so no label lands there whole.
+      const consumers = screens.find((s) => s.screen.includes("what's filling the context"))
+      if (!consumers) throw new Error(`consumers panel never rendered. screens: ${screens.map((s) => s.label).join(" | ")}`)
+      expect(consumers.screen).toContain("≡ system prompt")
     } finally {
       await m.stop()
       await proj.cleanup()
