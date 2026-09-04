@@ -713,14 +713,17 @@ export const BRANCH_DIALOG = { title: "Branch here → new OpenCode session", pl
 export const COPY_HINT = ".opencode/context-tree/last-copy.txt"
 
 /** `y` copy: the terminal's own clipboard through @opentui's OSC 52 (works over ssh/tmux when
- *  the terminal allows it), falling back to `COPY_HINT`. Throws if that file cannot be written. */
+ *  the terminal allows it) — but OSC 52 has no ack from the terminal, so a `true` here only
+ *  means the escape sequence was written, not that the terminal actually applied it (some
+ *  silently drop or truncate large payloads with no visible sign). `COPY_HINT` is therefore
+ *  always written too, whether or not OSC 52 reports success, so there's one place that's
+ *  reliably the last thing you copied. Throws if that file cannot be written. */
 export function copyText(api: TuiPluginApi, text: string, directory: string): { target: "clipboard" | "file"; hint: string } {
-  const renderer = api.renderer as unknown as { copyToClipboardOSC52?: (text: string) => boolean } | undefined
-  // an empty selection must never wipe the user's clipboard; it still lands in the file
-  if (text && renderer?.copyToClipboardOSC52?.(text)) return { target: "clipboard", hint: "clipboard" }
   const file = path.join(directory, COPY_HINT)
   fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.writeFileSync(file, text)
+  const renderer = api.renderer as unknown as { copyToClipboardOSC52?: (text: string) => boolean } | undefined
+  if (text && renderer?.copyToClipboardOSC52?.(text)) return { target: "clipboard", hint: "clipboard" }
   return { target: "file", hint: COPY_HINT }
 }
 

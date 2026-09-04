@@ -77,6 +77,8 @@ export type LaneEvent = {
   durationMs?: number
   error?: boolean
   tokens: number
+  /** `providerID/modelID` of the assistant message this event belongs to (model-lane events only). */
+  model?: string
 }
 
 /** One terminal cell of one lane. */
@@ -121,7 +123,8 @@ function partEvent(message: TranscriptMessage, part: StepPart, turn: number): La
   }
   if (part.type === "tool")
     return { ...base, lane: "tools", kind: "tool", error: part.state?.status === "error", tokens: estimateTokens(part.state?.output ?? "") + estimateTokens(JSON.stringify(part.state?.input ?? "")) }
-  return { ...base, lane: "model", kind: part.type === "reasoning" ? "reasoning" : "text", tokens: estimateTokens(part.text ?? "") }
+  const model = message.model ? `${message.model.providerID}/${message.model.modelID}` : undefined
+  return { ...base, lane: "model", kind: part.type === "reasoning" ? "reasoning" : "text", tokens: estimateTokens(part.text ?? ""), model }
 }
 
 /**
@@ -205,6 +208,10 @@ export type EventLayout = {
   empty: Record<LaneEvent["lane"], boolean>
   /** cells carrying a turn rule, drawn across every lane */
   rules: number[]
+  /** subset of `rules` where the Model lane's answering model differs from the previous turn
+   *  that had one — the strip's only cue that a switch happened (DESIGN.md §7.1 keeps colour
+   *  categorical by lane, not per-model, so this rides the existing turn-rule machinery). */
+  modelChanges: number[]
 }
 
 /**
@@ -215,12 +222,24 @@ export type EventLayout = {
 export function layoutEventStrip(transcript: Transcript, mode: LaneMode, filter: Filter = "all"): EventLayout {
   const events = eventsOf(transcript, filter)
   const widths = mode === "duration" ? durationWidths(events, events.length * DURATION_CELLS) : events.map(() => 1)
+  // one representative model per turn (its first Model-lane event that has one), so a turn with
+  // no text/reasoning (tool-only, or a filter that hid it) carries no opinion either way
+  const turnModel = new Map<number, string>()
+  for (const e of events) if (e.lane === "model" && e.model && !turnModel.has(e.turn)) turnModel.set(e.turn, e.model)
+  let lastModel = turnModel.get(events[0]?.turn ?? -1)
   const spans: { start: number; end: number }[] = []
   const rules: number[] = []
+  const modelChanges: number[] = []
   let cursor = 0
   events.forEach((_, i) => {
     const boundary = isTurnBoundary(events, i)
-    if (boundary) rules.push(cursor + 1) // centred in the wider gap it opens
+    if (boundary) {
+      const cell = cursor + 1
+      rules.push(cell) // centred in the wider gap it opens
+      const model = turnModel.get(events[i]!.turn)
+      if (model && lastModel && model !== lastModel) modelChanges.push(cell)
+      if (model) lastModel = model
+    }
     const start = cursor + (i === 0 ? 0 : boundary ? TURN_RULE_GAP : 1)
     cursor = start + (widths[i] ?? 1)
     spans.push({ start, end: cursor })
@@ -232,7 +251,7 @@ export function layoutEventStrip(transcript: Transcript, mode: LaneMode, filter:
     for (let c = spans[i]!.start; c < spans[i]!.end; c++) lanes[e.lane][c] = cell
   })
   const has = (lane: LaneEvent["lane"]) => !events.some((e) => e.lane === lane)
-  return { events, spans, totalWidth: cursor, lanes, empty: { input: has("input"), model: has("model"), tools: has("tools") }, rules }
+  return { events, spans, totalWidth: cursor, lanes, empty: { input: has("input"), model: has("model"), tools: has("tools") }, rules, modelChanges }
 }
 
 /**

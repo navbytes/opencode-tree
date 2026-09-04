@@ -13,7 +13,10 @@ const tick = () => (t += 1000)
 export function user(id: string, text: string): TranscriptMessage {
   return { id, role: "user", time: { created: tick() }, parts: [{ id: `${id}-p0`, type: "text", text }] }
 }
-export function assistant(id: string, opts: { text?: string; think?: { text?: string; ms?: number }; tool?: { name: string; input: unknown; output: string; ms?: number }; input?: number; output?: number }): TranscriptMessage {
+export function assistant(
+  id: string,
+  opts: { text?: string; think?: { text?: string; ms?: number }; tool?: { name: string; input: unknown; output: string; ms?: number }; input?: number; output?: number; model?: { providerID: string; modelID: string } },
+): TranscriptMessage {
   const parts: TranscriptMessage["parts"] = [{ id: `${id}-ss`, type: "step-start" }]
   if (opts.think) {
     const start = tick()
@@ -25,7 +28,7 @@ export function assistant(id: string, opts: { text?: string; think?: { text?: st
   }
   if (opts.text) parts.push({ id: `${id}-text`, type: "text", text: opts.text })
   parts.push({ id: `${id}-sf`, type: "step-finish" })
-  return { id, role: "assistant", time: { created: tick() }, tokens: { input: opts.input ?? 1000, output: opts.output ?? 50, reasoning: 0, cache: { read: 0, write: 0 } }, parts }
+  return { id, role: "assistant", time: { created: tick() }, tokens: { input: opts.input ?? 1000, output: opts.output ?? 50, reasoning: 0, cache: { read: 0, write: 0 } }, model: opts.model, parts }
 }
 
 /** Copy a prefix the way `session.fork` does: same content, fresh IDs. */

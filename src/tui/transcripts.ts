@@ -5,7 +5,7 @@
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { StepPart, Transcript, TranscriptMessage } from "../core/transcript.js"
 
-type AnyMessage = { id: string; role: string; time: { created: number; completed?: number }; tokens?: TranscriptMessage["tokens"]; summary?: unknown }
+type AnyMessage = { id: string; role: string; time: { created: number; completed?: number }; tokens?: TranscriptMessage["tokens"]; summary?: unknown; providerID?: string; modelID?: string }
 type AnyPart = { id: string; type: string; text?: string; tool?: string; callID?: string; state?: StepPart["state"]; time?: StepPart["time"]; metadata?: Record<string, unknown> }
 
 export function toStepPart(p: AnyPart): StepPart {
@@ -19,6 +19,7 @@ export function toTranscriptMessage(m: AnyMessage, parts: readonly AnyPart[]): T
     time: m.time,
     tokens: m.tokens,
     summary: m.role === "assistant" && m.summary === true ? true : undefined,
+    model: m.role === "assistant" && m.providerID && m.modelID ? { providerID: m.providerID, modelID: m.modelID } : undefined,
     parts: parts.map(toStepPart),
   }
 }

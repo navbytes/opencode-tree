@@ -108,6 +108,42 @@ describe("event strip", () => {
     }
   })
 
+  test("modelChanges marks the boundary where the answering model actually switches", () => {
+    const sonnet = { providerID: "anthropic", modelID: "claude-sonnet-5" }
+    const opus = { providerID: "anthropic", modelID: "claude-opus-5" }
+    const three = T([
+      user("u1", "a"),
+      assistant("a1", { text: "one", model: sonnet }),
+      user("u2", "b"),
+      assistant("a2", { text: "two", model: sonnet }), // same model: no mark
+      user("u3", "c"),
+      assistant("a3", { text: "three", model: opus }), // switched: mark
+    ])
+    const l = layoutEventStrip(three, "turns")
+    expect(l.rules.length).toBe(2)
+    expect(l.modelChanges).toEqual([l.rules[1]])
+  })
+
+  test("no model data at all: modelChanges stays empty, never guesses", () => {
+    const two = T([user("u1", "a"), assistant("a1", { text: "one" }), user("u2", "b"), assistant("a2", { text: "two" })])
+    expect(layoutEventStrip(two, "turns").modelChanges).toEqual([])
+  })
+
+  test("a tool-only turn between two models carries no opinion: the switch still shows on the next text turn", () => {
+    const sonnet = { providerID: "anthropic", modelID: "claude-sonnet-5" }
+    const opus = { providerID: "anthropic", modelID: "claude-opus-5" }
+    const three = T([
+      user("u1", "a"),
+      assistant("a1", { text: "one", model: sonnet }),
+      user("u2", "b"),
+      assistant("a2", { tool: { name: "bash", input: { command: "ls" }, output: "out" } }), // no text/model
+      user("u3", "c"),
+      assistant("a3", { text: "three", model: opus }),
+    ])
+    const l = layoutEventStrip(three, "turns")
+    expect(l.modelChanges).toEqual([l.rules[1]])
+  })
+
   test("duration mode: widths follow durations, untimed events keep one cell", () => {
     const slow = assistant("a1", { tool: { name: "bash", input: { command: "slow" }, output: "x", ms: 8000 } })
     const fast = assistant("a2", { tool: { name: "bash", input: { command: "fast" }, output: "x", ms: 1000 } })

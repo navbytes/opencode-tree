@@ -14,7 +14,7 @@ import { buildSpineMap, buildTreeView, currentChainOf, formatPromptAt, promptAtR
 import { ContextGauge } from "./gauge.js"
 import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
-import { applyCrop, branchLabel, BRANCH_DIALOG, clip as clipTo, copyText, createNamedBranch, describeTail, executeJump, executeUndo, jumpDialogOptions, jumpDialogTitle, mergeBranch, mergeDialogOptions, mergeDialogTitle, mergePickerFigures, MERGE_TRUST, setLabel, UNDO_KEY, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
+import { applyCrop, branchLabel, BRANCH_DIALOG, clip as clipTo, COPY_HINT, copyText, createNamedBranch, describeTail, executeJump, executeUndo, jumpDialogOptions, jumpDialogTitle, mergeBranch, mergeDialogOptions, mergeDialogTitle, mergePickerFigures, MERGE_TRUST, setLabel, UNDO_KEY, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
 import { decisionSummary, exportDecisions, renderDecision } from "../core/decision.js"
 import { laneLabel, laneSuffix, layoutEventStrip, overviewTrack, stripIndexFor, windowFor, LANE_CHROME, type LaneMode, type StripCell } from "../core/lanes.js"
 import { bar, consumers, type Consumer, type ConsumerEntry } from "../core/consumers.js"
@@ -634,16 +634,20 @@ export function TreeRoute(props: TreeRouteProps) {
     const start = laneOffset()
     const w = laneWidth()
     const rules = new Set(layout().rules)
+    const modelChanges = new Set(layout().modelChanges)
     const runs: { text: string; fg: unknown; bg: unknown }[] = []
     for (let c = 0; c < w; c++) {
       const cell = layout().lanes[lane][start + c] ?? null
       const sel = cell !== null && cur.has(cell.eventIndex)
-      const color = cell === null ? t.textMuted : cellColor(cell)
+      const changedHere = lane === "model" && modelChanges.has(start + c)
+      const color = cell === null ? (changedHere ? t.primary : t.textMuted) : cellColor(cell)
       const fg = sel ? t.background : color
       const bg = sel ? color : undefined
       // a turn boundary is a rule across all three lanes, the way DSH marks turns on its
-      // Overview — it never lands on a pill, the gap that holds it is opened for it
-      const glyph = cell?.glyph ?? (rules.has(start + c) ? "│" : " ")
+      // Overview — it never lands on a pill, the gap that holds it is opened for it. On the
+      // Model lane that rule thickens where the answering model actually switched, since colour
+      // there is already spoken for by kind (text/reasoning), not identity.
+      const glyph = cell?.glyph ?? (changedHere ? "┃" : rules.has(start + c) ? "│" : " ")
       const last = runs[runs.length - 1]
       if (last && last.fg === fg && last.bg === bg) last.text += glyph
       else runs.push({ text: glyph, fg, bg })
@@ -741,6 +745,7 @@ export function TreeRoute(props: TreeRouteProps) {
       if (row.label) kv("Label", row.label)
       kv("Tokens", `~${formatK(row.tokens)}`)
       kv("At", msg ? new Date(msg.time.created).toISOString().slice(11, 19) : "?")
+      if (msg?.model) kv("Model", `${msg.model.providerID}/${msg.model.modelID}`)
       if (!row.inContext) muted("not in this branch's context")
       block("Text", text)
       return out
@@ -749,6 +754,7 @@ export function TreeRoute(props: TreeRouteProps) {
     const stepNo = msg ? msg.parts.filter((p) => p.type === "tool" || p.type === "text").findIndex((p) => p.id === row.partID) + 1 : 0
     head(`${row.glyph} ${part?.type === "tool" ? part.tool : row.glyph === "◇" ? "compaction" : "assistant"} · T${turn?.kind === "turn" ? turn.turn : "?"} · step ${stepNo}`)
     kv("Hierarchy", `T${turn?.kind === "turn" ? turn.turn : "?"} › assistant › step ${stepNo}`)
+    if (msg?.model) kv("Model", `${msg.model.providerID}/${msg.model.modelID}`)
     if (!row.inContext) muted("not in this branch's context")
     if (row.tokenFields) {
       const tf = row.tokenFields
@@ -859,6 +865,11 @@ export function TreeRoute(props: TreeRouteProps) {
     notify(picks.length ? `marked ${picks.length} unprotected ${c.source} result${picks.length === 1 ? "" : "s"} — ⏎ to apply` : `every ${c.source} result is protected; mark with space (twice) to override`)
   }
 
+  /** OSC 52 clipboard "success" has no ack from the terminal, so `copyText` always writes
+   *  `COPY_HINT` too — surface it even on a reported clipboard hit, since that's the only
+   *  place a large paste that silently didn't land is still reliably sitting. */
+  const copyNotice = (length: number, hint: string) => `copied ${length} chars → ${hint}${hint === "clipboard" ? ` (paste empty? it's also at ${COPY_HINT})` : ""}`
+
   function copySelected() {
     // in the consumers panel `y` copies the selected entry — the only way to read a system
     // part in full, since it is not a message and has no row of its own
@@ -867,17 +878,24 @@ export function TreeRoute(props: TreeRouteProps) {
       const idx = line?.bucket.kind === "system" ? line.entry?.systemIndex : undefined
       const part = idx === undefined ? undefined : systemParts()?.[idx]
       const text = part?.text ?? line?.entry?.preview ?? ""
-      if (!text) return
+      if (!text) {
+        notify("nothing to copy here")
+        return
+      }
       try {
         const { hint } = copyText(api, text, directory)
-        notify(`copied ${text.length} chars → ${hint}`)
+        notify(copyNotice(text.length, hint))
       } catch (e) {
         notify(`copy failed: ${e instanceof Error ? e.message : String(e)}`)
       }
       return
     }
     const row = current()
-    if (!row || row.kind === "branch" || row.kind === "separator") return
+    if (!row) return
+    if (row.kind === "branch" || row.kind === "separator") {
+      notify(row.kind === "branch" ? "nothing to copy on a branch row — pick a turn or step" : "nothing to copy on a separator")
+      return
+    }
     const tr = row.sessionID === sessionID ? live() : others()[row.sessionID]
     const msg = tr?.messages.find((m) => m.id === row.messageID)
     const text = row.kind === "step" ? String(msg?.parts.find((p) => p.id === row.partID)?.state?.output ?? msg?.parts.find((p) => p.id === row.partID)?.text ?? "") : (msg?.parts.map((p) => p.text ?? "").join("\n") ?? "")

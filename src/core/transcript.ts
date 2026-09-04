@@ -31,6 +31,9 @@ export type TranscriptMessage = {
   /** OpenCode-native compaction summary marker (not the ctree "jump summary", which is a
    *  regular user message tagged via `metadata.ctree.kind === "summary"` instead). */
   summary?: boolean
+  /** The model that answered (assistant messages only) — for the inspector and the strip's
+   *  model-change marker. */
+  model?: { providerID: string; modelID: string }
   parts: StepPart[]
 }
 
