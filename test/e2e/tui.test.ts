@@ -5,7 +5,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import path from "node:path"
 import { readFileSync, readdirSync } from "node:fs"
-import { createProject, installPlugins, REPO_ROOT, runTui, runTuiScreens, startMock, type StartedMock } from "./harness.js"
+import { createProject, installPlugins, REPO_ROOT, runTui, startMock, type StartedMock } from "./harness.js"
 
 const e2e = process.env["CTREE_E2E"] === "1"
 
@@ -131,7 +131,7 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
     const proj = await createProject({ mockPort: m.port })
     await installPlugins({ projectDir: proj.dir, server: [path.join(REPO_ROOT, "dist", "server.js")], tui: [path.join(REPO_ROOT, "dist", "tui.js")] })
     try {
-      const run = await runTuiScreens({
+      const text = await runTui({
         projectDir: proj.dir,
         keys: [
           ["Ask anything", 1, "first question\r"],
@@ -147,19 +147,22 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
           // ↓ once = "Summarize everything below this point"
           ["Fork & prefill this turn", 1.5, "\x1b[B"],
           ["Summarize everything below", 1.5, "\r"],
-          ["mock reply|Ask anything", 14, "\x03"],
+          // the fork opens with the turn pre-filled: send it, so the model request that
+          // follows is the proof the injected summary is really in the fork's context
+          ["mock reply|Ask anything", 16, "\r"],
+          ["mock reply|Ask anything", 16, "\x03"],
           ["", 1, "\x03"],
         ],
-        timeoutSec: 200,
+        timeoutSec: 240,
         cols: 130,
         rows: 34,
         exitWhenDone: true,
       })
-      // all three Pi answers are on one screen, in Pi's order
-      const dialog = run.screens.map((s) => s.screen).find((s) => s.includes("Fork & prefill this turn"))!
-      expect(dialog).toContain("No summary")
-      expect(dialog).toContain("Summarize everything below this point")
-      expect(dialog).toContain("Summarize with a custom prompt")
+      // all three Pi answers, in Pi's order, from the one dialog ⏎ opens
+      expect(text).toContain("Fork & prefill this turn")
+      expect(text).toContain("No summary")
+      expect(text).toContain("Summarize everything below this point")
+      expect(text).toContain("Summarize with a custom prompt")
 
       const dir = path.join(proj.dir, ".opencode", "context-tree")
       const lines = readFileSync(path.join(dir, readdirSync(dir).find((f) => f.endsWith(".jsonl"))!), "utf8")
@@ -167,7 +170,8 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
       expect(lines.split('"type":"branch.opened"').length - 1).toBe(1)
       expect(lines).toContain('"kind":"redo"')
       expect(lines).toContain('"type":"summary.recorded"')
-      // and the summary was drafted from the abandoned turns, then injected at the destination
+      // the summary was drafted from the abandoned turns, and the fork's next model request
+      // carries it: injected with noReply, it only reaches the provider on the following turn
       const users = m.requests().map((r) => (r.body.messages as { role: string; content: unknown }[]).filter((x) => x.role === "user").map((x) => String(x.content)))
       expect(users.some((u) => u.some((c) => c.includes("Create a structured summary of this conversation branch")))).toBe(true)
       expect(users.some((u) => u.some((c) => c.startsWith("The user explored a different conversation branch")))).toBe(true)
