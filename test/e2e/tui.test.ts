@@ -5,7 +5,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import path from "node:path"
 import { readFileSync, readdirSync } from "node:fs"
-import { createProject, installPlugins, REPO_ROOT, runTui, startMock, type StartedMock } from "./harness.js"
+import { createProject, installPlugins, REPO_ROOT, runTui, runTuiScreens, startMock, type StartedMock } from "./harness.js"
 
 const e2e = process.env["CTREE_E2E"] === "1"
 
@@ -175,6 +175,56 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
       const users = m.requests().map((r) => (r.body.messages as { role: string; content: unknown }[]).filter((x) => x.role === "user").map((x) => String(x.content)))
       expect(users.some((u) => u.some((c) => c.includes("Create a structured summary of this conversation branch")))).toBe(true)
       expect(users.some((u) => u.some((c) => c.startsWith("The user explored a different conversation branch")))).toBe(true)
+    } finally {
+      await m.stop()
+      await proj.cleanup()
+    }
+  }, 320_000)
+
+  test("esc in the custom-prompt editor loops back to Pi's choices instead of cancelling the whole jump", async () => {
+    const m = await startMock({ tool: false })
+    const proj = await createProject({ mockPort: m.port })
+    await installPlugins({ projectDir: proj.dir, server: [path.join(REPO_ROOT, "dist", "server.js")], tui: [path.join(REPO_ROOT, "dist", "tui.js")] })
+    try {
+      const { screens } = await runTuiScreens({
+        projectDir: proj.dir,
+        keys: [
+          ["Ask anything", 1, "first question\r"],
+          ["mock reply", 6, "second question\r"],
+          ["mock reply", 14, "/tree"],
+          ["Context tree", 0.5, "\r"],
+          ["Context tree ·", 2, "gg"],
+          ["Context tree ·", 3, "\r"],
+          // ↓↓ = "Summarize with a custom prompt"
+          ["Fork & prefill this turn", 1.5, "\x1b[B\x1b[B"],
+          ["Summarize with a custom prompt", 1, "\r"],
+          // the DialogPrompt's own title never lands as one contiguous run in the raw
+          // ANSI-stripped stream (its text-cursor widget repaints unlike a plain title), so
+          // wait on a single word from it instead of the full phrase
+          ["instructions", 2, "focus on x"],
+          // esc here must return to the 3-choice picker, not cancel the whole jump
+          ["instructions", 1, "\x1b"],
+          ["instructions", 2, "\r"],
+          // confirms we really landed back on a live picker (not a dangling, unresolved
+          // promise): finish the flow by picking "No summary" and sending the prefilled turn
+          ["mock reply|Ask anything", 16, "\r"],
+          ["mock reply|Ask anything", 16, "\x03"],
+          ["", 1, "\x03"],
+        ],
+        timeoutSec: 240,
+        cols: 130,
+        rows: 34,
+        exitWhenDone: true,
+      })
+      const afterEsc = screens.find((s) => s.label.includes("conditional key 10"))
+      expect(afterEsc).toBeDefined()
+      expect(afterEsc!.screen).toContain("Fork & prefill this turn?")
+      expect(afterEsc!.screen).not.toContain("Custom summarization instructions")
+
+      const dir = path.join(proj.dir, ".opencode", "context-tree")
+      const lines = readFileSync(path.join(dir, readdirSync(dir).find((f) => f.endsWith(".jsonl"))!), "utf8")
+      // the detour through the custom-prompt editor changed nothing else: exactly one fork
+      expect(lines.split('"type":"branch.opened"').length - 1).toBe(1)
     } finally {
       await m.stop()
       await proj.cleanup()
