@@ -67,6 +67,7 @@ function captureSystem(store: JournalStore, sessionID: string, system: readonly 
 }
 
 export const server: Plugin = async ({ worktree, client, directory }, options) => {
+  debug("server.loaded", { worktree, directory })
   // same option parsing as the TUI half, so both write to the same place (docs/USAGE.md)
   const mode: StorageMode = options?.["storage"] === "global" ? "global" : "local"
   // awaiting an SDK call in the plugin factory deadlocks the server (plugin init blocks
