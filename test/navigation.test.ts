@@ -28,8 +28,8 @@ describe("navigation", () => {
     expect(toggleExpanded(b, OPEN).has(OPEN)).toBe(false)
   })
   test("cycleFilter order", () => {
-    expect(["default", "no-tools", "user-only", "labeled", "all", "default"].slice(1)).toEqual(
-      ["default", "no-tools", "user-only", "labeled", "all"].map((x) => cycleFilter(x as any)),
+    expect(["default", "no-tools", "tools-only", "user-only", "labeled", "all", "default"].slice(1)).toEqual(
+      ["default", "no-tools", "tools-only", "user-only", "labeled", "all"].map((x) => cycleFilter(x as any)),
     )
   })
   test("resolveSelection keeps the id, falls back to the owning turn, then the current row", () => {

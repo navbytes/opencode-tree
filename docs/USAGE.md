@@ -37,7 +37,7 @@ e.g. `{ "keybinds": { "open": "ctrl+t", "up": "k,up", "copy": "none" } }` — na
 `open up down jump_up jump_down half_up half_down first last prev_branch next_branch fold
 unfold toggle go branch label filter_pick filter_prev search search_next search_prev back
 crop crop_toggle_mode mark auto undo merge inspector consumers copy mode_duration mode_turns
-mode_calls lanes_off decisions export help`.
+lanes_off decisions export help`.
 
 ## Upgrading
 
@@ -113,7 +113,7 @@ appended to the trunk as a normal message.*
 | `D` `E` | decisions panel, export `ctree-decisions.md` |
 | `s` | consumers: what is filling the context (`⏎` opens a bucket, `space` marks one entry for crop) |
 | `i` | inspector pane on/off (auto-hidden under 110 columns) |
-| `1 2 3` `0` | timeline lanes by duration / turns / tool calls; `0` off |
+| `1 2` `0` | timeline lanes, x-axis by duration / one cell per event; `0` off. `│` marks a turn boundary, and the lanes show whatever the `f` filter shows — so `f` → `tools-only` is the "what did I run" view in both the rows and the lanes |
 | `L` | label the selected message |
 | `f` `F` | filter picker (default → no-tools → user-only → labeled → all); `F` steps back |
 | `/` `n` `N` | live search: typing re-filters the rows, `⏎` keeps the filter, `esc` clears; `n` `N` next / previous match |

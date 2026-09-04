@@ -351,6 +351,15 @@ describe("filters, search, labels, crops", () => {
     expect(shape(buildTreeView({ ...base, filter: "user-only" }).rows)).toEqual(["T1", "T2", "T3"])
     expect(buildTreeView({ ...base, filter: "all" }).rows.filter((r) => r.kind === "step").length).toBeGreaterThan(4)
   })
+  test("tools-only keeps ⚙ rows and the branch structure: the 'what did I run' view", () => {
+    const rows = buildTreeView({ ...base, filter: "tools-only" }).rows
+    expect(shape(rows)).toEqual(["⚙", "├⎇try-redis", "╰⎇fix-flaky-test"])
+    expect(rows.every((r) => r.kind !== "turn")).toBe(true)
+    // it is the mirror of no-tools: between them they cover every step
+    const all = buildTreeView({ ...base, filter: "default" }).rows.filter((r) => r.kind === "step").length
+    const split = buildTreeView({ ...base, filter: "no-tools" }).rows.filter((r) => r.kind === "step").length + rows.filter((r) => r.kind === "step").length
+    expect(split).toBe(all)
+  })
   test("labeled shows only labelled turns", () => {
     const view = buildTreeView({ ...base, filter: "labeled", labels: { m2: "⎇ checkpoint" } })
     expect(shape(view.rows)).toEqual(["T2"])

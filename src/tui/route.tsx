@@ -172,7 +172,6 @@ const DEFAULT_KEYS: Record<string, string[]> = {
   copy: ["y"],
   mode_duration: ["1"],
   mode_turns: ["2"],
-  mode_calls: ["3"],
   lanes_off: ["0"],
   decisions: ["shift+d"],
   export: ["shift+e"],
@@ -205,7 +204,7 @@ const HELP = [
   "  b branch · m merge · c crop mode (space mark · a auto · t result⇄turn · ⏎ apply · esc leave)",
   "  u undo (alias x) · L label · y copy · E export decisions",
   "Views",
-  "  i inspector · 1 2 3 lanes (duration/turns/calls) · 0 off · s consumers · D decisions · f F filter",
+  "  i inspector · 1 2 lanes (duration/turns x-axis) · 0 off · s consumers · D decisions · f F filter",
   "Legend",
   "  ● user · ○ assistant · ⚙ tool step · ◆ decision · ≣ summary · ⎇ branch (a real OpenCode session)",
   "  │ ├ ╰ draw the topology · ▾ open ▸ folded · ← here is the session you are in",
@@ -215,12 +214,14 @@ const HELP = [
   "  ⎇ colours: open green · squashed blue · rejected/discarded red · abandoned grey",
   "  lanes: Input green you / grey context · Model purple answer / grey thinking · Tools orange call / red failed",
   "  the lanes are a window that follows the cursor: …N / N… are events hidden either side, all = whole session",
+  "  │ in the lanes is a turn boundary · the lanes show what the f filter shows (f → tools-only = just calls)",
 ]
 
 /** `f` opens this as a picker; `F` steps back through it (DESIGN.md §7.5). */
 const FILTERS: { title: string; value: Filter; description: string }[] = [
   { title: "default", value: "default", description: "user turns, assistant text, tool steps" },
   { title: "no-tools", value: "no-tools", description: "hide ⚙ tool steps" },
+  { title: "tools-only", value: "tools-only", description: "⚙ tool steps only — what did I run (the lanes follow)" },
   { title: "user-only", value: "user-only", description: "● user turns only" },
   { title: "labeled", value: "labeled", description: "labelled rows only" },
   { title: "all", value: "all", description: "everything, thinking parts included" },
@@ -255,7 +256,8 @@ export function TreeRoute(props: TreeRouteProps) {
   const [summaryAbort, setSummaryAbort] = createSignal<AbortController | undefined>()
   const [cropMode, setCropMode] = createSignal<"result" | "turn" | undefined>()
   const [panel, setPanel] = createSignal<"tree" | "decisions" | "consumers" | "help">(props.initialView ?? "tree")
-  const [laneMode, setLaneMode] = createSignal<LaneMode>(api.kv.get<LaneMode>("ctree.lanes", "turns"))
+  // "calls" was a third mode until it became the `tools-only` row filter; old kv still holds it
+  const [laneMode, setLaneMode] = createSignal<LaneMode>(api.kv.get<LaneMode>("ctree.lanes", "turns") === "duration" ? "duration" : "turns")
   // DSH lanes and inspector are first-class but off by default, so the first screen reads as
   // Pi's clean outline (header + tree + footer); `1/2/3` and `i` bring them in, one keystroke.
   const [lanesOn, setLanesOn] = createSignal<boolean>(api.kv.get<boolean>("ctree.lanesOn", false))
@@ -397,7 +399,7 @@ export function TreeRoute(props: TreeRouteProps) {
   // ---- lane geometry (the lanes themselves are further down) ----------------
   // 61 = the 12-cell label column + the `N…` cue + the mode legend that follows the Input lane
   const laneWidth = () => Math.max(10, Math.min(width() - 61, 80))
-  const layout = createMemo(() => layoutEventStrip(live() ?? EMPTY_TRANSCRIPT, laneMode()))
+  const layout = createMemo(() => layoutEventStrip(live() ?? EMPTY_TRANSCRIPT, laneMode(), filter()))
   /** DESIGN.md §7.6: below 80 columns the strip is the Input lane alone. */
   const showAllLanes = () => cols() >= 80
   /** The overview track only exists — and only costs its row — when the timeline overflows. */
@@ -616,6 +618,7 @@ export function TreeRoute(props: TreeRouteProps) {
     const cur = cursorEvents()
     const start = laneOffset()
     const w = laneWidth()
+    const rules = new Set(layout().rules)
     const runs: { text: string; fg: unknown; bg: unknown }[] = []
     for (let c = 0; c < w; c++) {
       const cell = layout().lanes[lane][start + c] ?? null
@@ -623,9 +626,12 @@ export function TreeRoute(props: TreeRouteProps) {
       const color = cell === null ? t.textMuted : cellColor(cell)
       const fg = sel ? t.background : color
       const bg = sel ? color : undefined
+      // a turn boundary is a rule across all three lanes, the way DSH marks turns on its
+      // Overview — it never lands on a pill, the gap that holds it is opened for it
+      const glyph = cell?.glyph ?? (rules.has(start + c) ? "│" : " ")
       const last = runs[runs.length - 1]
-      if (last && last.fg === fg && last.bg === bg) last.text += cell?.glyph ?? " "
-      else runs.push({ text: cell?.glyph ?? " ", fg, bg })
+      if (last && last.fg === fg && last.bg === bg) last.text += glyph
+      else runs.push({ text: glyph, fg, bg })
     }
     return runs
   }
@@ -1304,7 +1310,6 @@ export function TreeRoute(props: TreeRouteProps) {
       { name: "ctree.copy", hidden: true, enabled: treeIdle, run: () => copySelected() },
       { name: "ctree.mode_duration", hidden: true, enabled: treePanel, run: () => setLane("duration") },
       { name: "ctree.mode_turns", hidden: true, enabled: treePanel, run: () => setLane("turns") },
-      { name: "ctree.mode_calls", hidden: true, enabled: treePanel, run: () => setLane("calls") },
       { name: "ctree.lanes_off", hidden: true, enabled: treePanel, run: () => { setLanesOn(false); api.kv.set("ctree.lanesOn", false) } },
       { name: "ctree.decisions", hidden: true, enabled: () => !inCrop(), run: () => setPanel(panel() === "decisions" ? "tree" : "decisions") },
       { name: "ctree.export", hidden: true, enabled: () => panel() === "decisions", run: () => exportDecisionsFile() },
@@ -1447,7 +1452,7 @@ export function TreeRoute(props: TreeRouteProps) {
           <Show when={!layout().empty.input} fallback={<text fg={t.textMuted}>{"no input".padEnd(laneWidth())}</text>}>
             <For each={inputRuns()}>{(r) => <text fg={r.fg as never} bg={r.bg as never}>{r.text}</text>}</For>
           </Show>
-          <text fg={t.textMuted}>{`${(hiddenRight() > 0 ? `${laneCue(hiddenRight())}…` : "").padStart(4).padEnd(5)}${laneMode() === "duration" ? "[1] Duration" : " 1  duration"} · ${laneMode() === "turns" ? "[2] Turns" : " 2  turns"} · ${laneMode() === "calls" ? "[3] Calls" : " 3  calls"} · 0 off`}</text>
+          <text fg={t.textMuted}>{`${(hiddenRight() > 0 ? `${laneCue(hiddenRight())}…` : "").padStart(4).padEnd(5)}${laneMode() === "duration" ? "[1] Duration" : " 1  duration"} · ${laneMode() === "turns" ? "[2] Turns" : " 2  turns"} · 0 off`}</text>
         </box>
         <Show when={showAllLanes()}>
           <box flexDirection="row">

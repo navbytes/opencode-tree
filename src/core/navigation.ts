@@ -61,10 +61,10 @@ export function toggleExpanded(expanded: Set<string>, sessionID: string): Set<st
   return next
 }
 
-const FILTER_ORDER: Filter[] = ["default", "no-tools", "user-only", "labeled", "all"]
+const FILTER_ORDER: Filter[] = ["default", "no-tools", "tools-only", "user-only", "labeled", "all"]
 
-/** `f` cycles `default → no-tools → user-only → labeled → all → default …`
- *  (DESIGN.md §7.5). */
+/** `f` cycles `default → no-tools → tools-only → user-only → labeled → all → default …`
+ *  (DESIGN.md §7.5). `tools-only` is the "what did I run" view, and the lanes follow it. */
 export function cycleFilter(filter: Filter): Filter {
   const idx = FILTER_ORDER.indexOf(filter)
   return FILTER_ORDER[(idx + 1) % FILTER_ORDER.length]!

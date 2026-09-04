@@ -21,7 +21,7 @@ import type { BranchState, TreeState } from "./journal.js"
 import { estimateTokens, formatK } from "./tokens.js"
 import { messagePreview, partPreview, stepKind, type StepPart, type Transcript, type TranscriptMessage } from "./transcript.js"
 
-export type Filter = "default" | "no-tools" | "user-only" | "labeled" | "all"
+export type Filter = "default" | "no-tools" | "tools-only" | "user-only" | "labeled" | "all"
 
 export type TurnRow = {
   kind: "turn"
@@ -333,12 +333,15 @@ function stepAllowed(filter: Filter, kind: "text" | "tool" | "reasoning" | "othe
       return kind !== "other"
     case "no-tools":
       return kind !== "other" && kind !== "tool"
+    case "tools-only":
+      return kind === "tool"
     case "all":
       return true
   }
 }
 
 function turnAllowed(filter: Filter, label: string | undefined): boolean {
+  if (filter === "tools-only") return false
   return filter === "labeled" ? Boolean(label) : true
 }
 
