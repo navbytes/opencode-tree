@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.3 (unreleased)
+## 0.2.3 — 2026-09-04
 
 - **The inspector shows the whole field now, and pages through it.** It used to cap each field
   at a fixed 8 (Payload) / 10 (Result) / 14 (Text) lines whatever the terminal, so a tall
