@@ -227,7 +227,7 @@ function tokenFieldsOf(message: TranscriptMessage): StepRow["tokenFields"] {
   return { input: tk.input ?? 0, output: tk.output, reasoning: tk.reasoning ?? 0, cacheRead: tk.cache?.read ?? 0, cacheWrite: tk.cache?.write ?? 0 }
 }
 
-function aggregateTokens(messages: TranscriptMessage[]): number {
+export function aggregateTokens(messages: TranscriptMessage[]): number {
   let total = 0
   for (const m of messages) {
     if (m.role === "user") total += estimateTokens(userText(m))
@@ -775,6 +775,40 @@ export function buildTreeView(o: BuildOptions): TreeView {
 // Positional map between spine rows and the current session's copied prefix.
 // ---------------------------------------------------------------------------
 
+export type SpineEntry = { sessionID: string; messageID: string }
+
+/**
+ * Every message on a session's context path, root-first: each on-path ancestor's copied
+ * prefix named by *its own* message IDs, then the session's own tail. Position `i` is the
+ * index of that message in `transcripts[sessionID].messages`, so two sessions' spines can be
+ * compared entry-by-entry (`sessionID:messageID`) to find where they diverge — see
+ * `abandonedTail` in `core/actions.ts`.
+ *
+ * An ancestor whose transcript is not loaded contributes nothing and its share falls to the
+ * session itself, exactly as `prefixLengthOf` and `buildSpineMap` treat it.
+ */
+export function spineOf(state: TreeState, transcripts: Record<string, Transcript>, sessionID: string): SpineEntry[] {
+  const chain = currentChainOf(state, sessionID)
+  const out: SpineEntry[] = []
+  let from = 0
+  for (let s = 0; s < chain.length; s++) {
+    const sid = chain[s]!
+    const own = transcripts[sid]
+    const child = chain[s + 1]
+    if (child !== undefined) {
+      const anchorID = state.sessions[child]?.anchorMessageID
+      const anchorIndex = own && anchorID !== undefined ? own.messages.findIndex((m) => m.id === anchorID) : -1
+      if (own && anchorIndex !== -1) {
+        for (const m of own.messages.slice(from, anchorIndex + 1)) out.push({ sessionID: sid, messageID: m.id })
+        from = anchorIndex + 1
+      }
+      continue
+    }
+    if (own) for (const m of own.messages.slice(from)) out.push({ sessionID: sid, messageID: m.id })
+  }
+  return out
+}
+
 export type SpineMap = {
   /** `${sessionID}:${messageID}` of any spine message → index into the current transcript */
   index: Map<string, number>
@@ -793,32 +827,8 @@ export type SpineMap = {
 export function buildSpineMap(o: Pick<BuildOptions, "state" | "transcripts" | "currentSessionID">): SpineMap {
   const current = o.transcripts[o.currentSessionID]
   const index = new Map<string, number>()
-  const owner: { sessionID: string; messageID: string }[] = []
-  if (current) {
-    const spine = [...ancestorChainOf(o.state, o.currentSessionID), o.currentSessionID]
-    let from = 0
-    for (let s = 0; s < spine.length; s++) {
-      const sessionID = spine[s]!
-      const own = o.transcripts[sessionID]
-      const child = spine[s + 1]
-      const childBranch = child ? o.state.sessions[child] : undefined
-      if (s < spine.length - 1) {
-        const anchorIndex = own ? own.messages.findIndex((m) => m.id === childBranch?.anchorMessageID) : -1
-        if (own && anchorIndex !== -1) {
-          own.messages.slice(from, anchorIndex + 1).forEach((m, i) => {
-            index.set(`${sessionID}:${m.id}`, from + i)
-            owner[from + i] = { sessionID, messageID: m.id }
-          })
-          from = anchorIndex + 1
-        }
-        continue
-      }
-      current.messages.slice(from).forEach((m, i) => {
-        index.set(`${sessionID}:${m.id}`, from + i)
-        owner[from + i] = { sessionID, messageID: m.id }
-      })
-    }
-  }
+  const owner: SpineEntry[] = current ? spineOf(o.state, o.transcripts, o.currentSessionID) : []
+  owner.forEach((e, i) => index.set(`${e.sessionID}:${e.messageID}`, i))
   const messageAt = (i: number) => current?.messages[i]
   const toCurrent = (sessionID: string, messageID: string) => {
     const i = index.get(`${sessionID}:${messageID}`)

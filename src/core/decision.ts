@@ -59,8 +59,13 @@ export function branchTranscriptText(transcript: Transcript, anchor: { messageID
     anchorIndex = anchor.parentMessageIDs.indexOf(anchor.messageID)
     if (anchorIndex === -1) throw new Error(`anchor message ${anchor.messageID} is no longer in the parent session — cannot tell this branch's own turns from the shared prefix`)
   }
-  const msgs = transcript.messages.slice(anchorIndex + 1)
-  return msgs
+  return transcriptText(transcript.messages.slice(anchorIndex + 1), toolChars)
+}
+
+/** `[User]: …` / `[Assistant]: …` lines for a run of messages, tool results truncated —
+ *  what both the merge drafter and the branch summarizer hand to the model. */
+export function transcriptText(messages: readonly TranscriptMessage[], toolChars = 2000): string {
+  return messages
     .map((m) => messageText(m, toolChars))
     .filter(Boolean)
     .join("\n\n")

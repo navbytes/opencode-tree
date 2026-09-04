@@ -5,7 +5,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import path from "node:path"
 import { readFileSync, readdirSync } from "node:fs"
-import { createProject, installPlugins, REPO_ROOT, runTui, startMock, type StartedMock } from "./harness.js"
+import { createProject, installPlugins, REPO_ROOT, runTui, runTuiScreens, startMock, type StartedMock } from "./harness.js"
 
 const e2e = process.env["CTREE_E2E"] === "1"
 
@@ -120,6 +120,57 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
       const lines = readFileSync(path.join(dir, readdirSync(dir).find((f) => f.endsWith(".jsonl"))!), "utf8")
       for (const t of ["decision.recorded", "branch.closed"]) expect(lines).toContain(`"type":"${t}"`)
       expect(lines.split('"type":"branch.opened"').length - 1).toBe(2) // opened, squashed, re-opened by undo
+    } finally {
+      await m.stop()
+      await proj.cleanup()
+    }
+  }, 320_000)
+
+  test("⏎ on an earlier turn offers Pi's three fork choices; summarize lands a ≣ summary in the fork", async () => {
+    const m = await startMock({ tool: false })
+    const proj = await createProject({ mockPort: m.port })
+    await installPlugins({ projectDir: proj.dir, server: [path.join(REPO_ROOT, "dist", "server.js")], tui: [path.join(REPO_ROOT, "dist", "tui.js")] })
+    try {
+      const run = await runTuiScreens({
+        projectDir: proj.dir,
+        keys: [
+          ["Ask anything", 1, "first question\r"],
+          ["mock reply", 6, "second question\r"],
+          ["mock reply", 14, "/tree"],
+          ["Context tree", 0.5, "\r"],
+          // the first user turn, three turns above the tip: ⏎ there asks Pi's question
+          ["Context tree ·", 2, "gg"],
+          ["Context tree ·", 3, "\r"],
+          // esc on the choices goes back to the row with nothing done (Pi's showTreeSelector)
+          ["Fork & prefill this turn", 1.5, "\x1b"],
+          ["Context tree ·", 3, "\r"],
+          // ↓ once = "Summarize everything below this point"
+          ["Fork & prefill this turn", 1.5, "\x1b[B"],
+          ["Summarize everything below", 1.5, "\r"],
+          ["mock reply|Ask anything", 14, "\x03"],
+          ["", 1, "\x03"],
+        ],
+        timeoutSec: 200,
+        cols: 130,
+        rows: 34,
+        exitWhenDone: true,
+      })
+      // all three Pi answers are on one screen, in Pi's order
+      const dialog = run.screens.map((s) => s.screen).find((s) => s.includes("Fork & prefill this turn"))!
+      expect(dialog).toContain("No summary")
+      expect(dialog).toContain("Summarize everything below this point")
+      expect(dialog).toContain("Summarize with a custom prompt")
+
+      const dir = path.join(proj.dir, ".opencode", "context-tree")
+      const lines = readFileSync(path.join(dir, readdirSync(dir).find((f) => f.endsWith(".jsonl"))!), "utf8")
+      // the escape round changed nothing: exactly one fork, from the one ⏎ we went through with
+      expect(lines.split('"type":"branch.opened"').length - 1).toBe(1)
+      expect(lines).toContain('"kind":"redo"')
+      expect(lines).toContain('"type":"summary.recorded"')
+      // and the summary was drafted from the abandoned turns, then injected at the destination
+      const users = m.requests().map((r) => (r.body.messages as { role: string; content: unknown }[]).filter((x) => x.role === "user").map((x) => String(x.content)))
+      expect(users.some((u) => u.some((c) => c.includes("Create a structured summary of this conversation branch")))).toBe(true)
+      expect(users.some((u) => u.some((c) => c.startsWith("The user explored a different conversation branch")))).toBe(true)
     } finally {
       await m.stop()
       await proj.cleanup()

@@ -66,6 +66,26 @@ c … space … ⏎      crop a fat tool result (double space for protected ones
 u                  undo the last crop / branch / merge on this path (alias x)
 ```
 
+`⏎` on any row above your current position asks Pi's tree-selector question, and the answer
+is also the confirmation — there is no separate yes/no step:
+
+| option | what it does |
+|---|---|
+| **No summary** | fork (or switch) clean; everything below the row you picked stays behind on the old session, out of the model's context |
+| **Summarize everything below this point** (a switch reads "Summarize what you are leaving") | one model call drafts a Goal / Constraints / Progress / Key decisions / Next steps summary of exactly the turns the move abandons, and it lands at the destination as one `≣` message the model reads |
+| **Summarize with a custom prompt** | the same, with your own focus ("just the API decisions", "keep the stack traces") |
+
+The option lines say how much you are leaving — `drop the 3 turns · ~14k below this point`.
+"Everything below this point" means what Pi means: the turns from where you are now back to
+the point the two paths share, so redoing trunk turn 2 summarizes turns 2–3, while switching
+from a branch to a sibling summarizes the branch's own turns and not the shared trunk.
+
+`esc` on the choices puts you back on the same row with nothing done; `esc` while the summary
+is being drafted cancels the draft *and* the move — nothing is forked until the summary is
+ready. A summary that fails outright never blocks the move: you get a notice and go anyway.
+Set `jumpSummary: "never"` for a plain confirm instead (the pure `pi-context-tree` stance);
+a jump with nothing below the selected point skips the question too.
+
 `/merge` asks how to close the branch:
 
 | option | what it does |
@@ -85,7 +105,7 @@ appended to the trunk as a normal message.*
 | `↑↓` `j k` · `J K` (20) · `ctrl+d` `ctrl+u` · `gg` `G` | move · half page · top / bottom |
 | `[` `]` | previous / next branch row |
 | `← →` `h l` · `Tab` (or `e`) | fold / unfold a branch inline |
-| `⏎` | go here — the footer names what it will do for the row you are on: switch to a `⎇` branch, fork & prefill a user turn, fork after a step. Confirms first, then asks "Summarize the branch you are leaving?" (Pi); `u` undoes it |
+| `⏎` | go here — the footer names what it will do for the row you are on: switch to a `⎇` branch, fork & prefill a user turn, fork after a step. Opens Pi's one question (below), which is also the confirmation; `u` undoes it |
 | `b` | branch here: name it, then "Model for this branch" (Enter keeps the current one) |
 | `m` | merge: Squash / Squash without LLM / Discard / Tournament (siblings only) |
 | `c` `space` `a` `t` `⏎` | crop mode: mark (`space` alone enters it on a croppable row), auto-mark (≥10k tokens, older than 2 turns), result⇄turn, apply |
