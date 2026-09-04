@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.4 — 2026-09-04
 
 - Consumers (`s`) counts the **system prompt**. It walked the transcript only, so its total
   could never be reconciled with the `ctx …` gauge two lines above it, which reads
