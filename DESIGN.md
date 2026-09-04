@@ -275,36 +275,69 @@ happens to the session. `q` returns to the chat exactly as it was.
 
 ### 6.2 Jump ("go here") — the Pi `/tree` move
 
-Select any row, press `⏎`.
+Select any row, press `⏎`. What the row *is* decides the move, exactly as Pi's
+`agent-session.ts#navigateTree` decides it from the entry type:
 
 - Row is the **tip of a branch** (its last message) → switch to that session
   (`route.navigate("session")`). No fork. This is Pi's "move the leaf to an existing
   leaf".
-- Row is a **user message** in the middle → confirm dialog *"Redo this turn on a new
-  branch?"* → `session.fork({ messageID })` (copies everything *before* it) →
-  `branch.opened{kind:"jump"}` → open the new session → the user text is pre-filled in
-  the prompt (`tui.appendPrompt`). Identical to Pi's user-message semantics and to
-  OpenCode's own `/fork`.
+- Row is a **user message** in the middle → `session.fork({ messageID })` (copies everything
+  *before* it) → `branch.opened{kind:"redo"}` → open the new session → the user text is
+  pre-filled in the prompt (`tui.appendPrompt`). Pi does the same thing by moving the leaf to
+  the message's *parent* and putting its text in the editor.
 - Row is an **assistant/tool step** → fork at the *next* message (so the step is
   included) with an empty prompt: "continue from here".
 - Row is a **branch header** → same as its tip.
 
-If the current session is streaming, we abort it first (`session.abort`) and say so,
-as Pi does since #7022. The old branch is untouched and stays visible. Undo: `x`
-closes the jump branch as `abandoned` and returns to where you were.
+**One question, three answers.** `⏎` opens Pi's tree-selector question, and that question
+*is* the confirmation — there is no separate yes/no step:
 
-After a jump that leaves an open path behind, the plugin asks Pi's question:
-**"Summarize the branch you are leaving? No / Summarize / Summarize with custom
-prompt"** (option `jumpSummary`, default `"ask"`; `"never"` for the pure
-`pi-context-tree` stance). *Summarize* generates the Pi-format branch summary (Goal /
-Constraints / Progress / Key decisions / Next steps) in a throw-away helper session,
-deletes it, and injects the text into the destination session with
-`session.prompt({ noReply: true })` prefixed by "The user explored a different
-conversation branch before returning here", tagged `metadata.ctree.kind = "summary"`,
-exactly as `opencode-tree` does. `Esc` in the picker returns to the tree at the same
-row. The summary is journalled (`summary.recorded`) so `/undo` can hide it and the
-decisions view can distinguish ◆ confirmed records from ◇ auto summaries. `/merge`
-remains the reviewed path; a summary is never written when a merge closes the branch.
+```
+┌ Fork & prefill this turn? ───────────────────────────────────────────────┐
+│ No summary                              start clean · nothing carried over│
+│ Summarize everything below this point   carry the 3 turns · ~14k over…   │
+│ Summarize with a custom prompt          the same, with your own focus    │
+└──────────────────────────────────────────────────────────────────────────┘
+
+(A **switch** to another branch has no picked point, so its middle answer reads
+"Summarize what you are leaving"; everything else is the same.)
+```
+
+Pi's order and Pi's escape hatches: `esc` on the choices puts you back on the same row with
+nothing done, and cancelling the custom-prompt editor loops back to the three choices rather
+than quietly meaning "no summary" (`interactive-mode.ts#showTreeSelector`). Option
+`jumpSummary`, default `"ask"`; `"never"` (the pure `pi-context-tree` stance) degrades it to
+a plain confirm, as does a jump with nothing below the selected point to summarize.
+
+**What "everything below that point" is.** Pi collects the entries from the old leaf back to
+the **common ancestor** with the target and summarizes those. We compute the same set across
+sessions: both sides are reduced to their *spine* (`core/tree.ts#spineOf`) — the ordered
+`sessionID:messageID` path from the root, where an ancestor's copied prefix keeps the
+ancestor's own IDs — the deepest entry present in both is the common ancestor, and everything
+after it in the current session is the abandoned tail (`core/actions.ts#abandonedTail`, unit
+tested). A `fork` plan cuts the target spine *before* its boundary, because `session.fork`
+copies messages strictly before it. So redoing trunk turn 2 summarizes turns 2–3; switching
+from a branch to a sibling summarizes the branch's own turns and not the shared trunk.
+
+**Order of operations**, matching `navigateTree`: abort a streaming response first
+(`session.abort`, Pi #7022, so the summary covers the reply as it actually ended) → draft the
+summary while *nothing has moved yet* → fork or switch → inject. Drafting first is what makes
+`esc` meaningful: it aborts the helper session's reply and the whole jump, leaving you on the
+row you started from. A summary that *fails* (rather than being aborted) never blocks the
+move — we say so and go anyway, because the alternative is stranding you on the session you
+asked to leave.
+
+*Summarize* generates the Pi-format branch summary (Goal / Constraints / Progress / Key
+decisions / Next steps) in a throw-away helper session, deletes it, and injects the text into
+the **destination** session with `session.prompt({ noReply: true })` prefixed by "The user
+explored a different conversation branch before returning here", tagged
+`metadata.ctree.kind = "summary"` — Pi likewise attaches its `branch_summary` entry at the new
+leaf, not on the branch it left. The summary is journalled (`summary.recorded`) so `/undo` can
+hide it and the decisions view can distinguish ◆ confirmed records from ◇ auto summaries.
+`/merge` remains the reviewed path; a summary is never written when a merge closes the branch.
+
+The old branch is untouched and stays visible. Undo: `x` closes the jump branch as
+`abandoned` and returns to where you were.
 
 ### 6.3 `/branch fix-flaky-test [haiku-4.5]`
 
@@ -658,7 +691,7 @@ packages/
 |---|---|---|
 | 1 | Package and slash names | **`opencode-context-tree`**; slash `/tree` with alias `/ctree`; headless server commands are `/ctree …`. The `/tree` name only collides if `@ishaksebsib/opencode-tree` is installed alongside. |
 | 2 | Journal location | **Local**, `<worktree>/.opencode/context-tree/`, gitignored by default. `storage: "global"` remains an option. |
-| 3 | Summarize on jump | **Ask every time** (Pi behaviour): No / Summarize / Custom prompt. `jumpSummary: "never"` opts out. Summaries are journalled as ◇ unreviewed and are distinct from ◆ merge records. |
+| 3 | Summarize on jump | **Ask every time** (Pi behaviour), as the one dialog `⏎` opens: No summary / Summarize everything below this point / Summarize with a custom prompt. The summary covers the abandoned tail (§6.2), not the whole session. `jumpSummary: "never"` opts out. Summaries are journalled as ◇ unreviewed and are distinct from ◆ merge records. |
 | 4 | Undo of a squash | **Hide the ◆ record from the model, keep it on screen.** Journal marks it inactive; the hook drops it; OpenCode storage untouched. No delete path in v1. |
 | 5 | Code base | **From scratch, spec-driven.** Port the `pi-context-tree` *semantics* (merge modes, crop protections, undo rules, gauge bands, decision template) and its *method* (pure `core` reducers, journal fold, golden fixtures, table-driven view-model tests), but write all code against OpenCode's message/part/session model. Do not fork `@ishaksebsib/opencode-tree` (unmaintained) or copy Pi entry-based code; read both only as API references. Reliability rule: every OpenCode API the plugin depends on gets an integration test against `opencode serve` with a mock provider before it is used by a feature. |
 

@@ -10,7 +10,10 @@ elsewhere — timing, inspector) in one screen.
 Branch, jump, labels, filters, search, crop + undo, squash/discard/tournament merge with a
 `$EDITOR` gate, the timeline lanes, inspector and consumers views, the gauge, and the headless
 `/ctree` commands all work against OpenCode 1.18 and are covered by pty-driven e2e tests
-(`bun run test:e2e`). Read [DESIGN.md](./DESIGN.md) — it contains the research
+(`bun run test:e2e`). Pressing `⏎` on an earlier message is Pi's fork flow whole — one
+question with Pi's three answers (no summary · summarize everything below that point ·
+summarize with your own prompt), and the summary covers exactly the turns the move leaves
+behind. Read [DESIGN.md](./DESIGN.md) — it contains the research
 (Pi, `pi-context-tree`, OpenCode plugin/SDK surface, existing plugins, DSH
 trajectory), the end-user flows, the combined tree + trajectory mockup, the data
 model, architecture, edge cases, and the roadmap.

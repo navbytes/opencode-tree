@@ -126,6 +126,61 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
     }
   }, 320_000)
 
+  test("⏎ on an earlier turn offers Pi's three fork choices; summarize lands a ≣ summary in the fork", async () => {
+    const m = await startMock({ tool: false })
+    const proj = await createProject({ mockPort: m.port })
+    await installPlugins({ projectDir: proj.dir, server: [path.join(REPO_ROOT, "dist", "server.js")], tui: [path.join(REPO_ROOT, "dist", "tui.js")] })
+    try {
+      const text = await runTui({
+        projectDir: proj.dir,
+        keys: [
+          ["Ask anything", 1, "first question\r"],
+          ["mock reply", 6, "second question\r"],
+          ["mock reply", 14, "/tree"],
+          ["Context tree", 0.5, "\r"],
+          // the first user turn, three turns above the tip: ⏎ there asks Pi's question
+          ["Context tree ·", 2, "gg"],
+          ["Context tree ·", 3, "\r"],
+          // esc on the choices goes back to the row with nothing done (Pi's showTreeSelector)
+          ["Fork & prefill this turn", 1.5, "\x1b"],
+          ["Context tree ·", 3, "\r"],
+          // ↓ once = "Summarize everything below this point"
+          ["Fork & prefill this turn", 1.5, "\x1b[B"],
+          ["Summarize everything below", 1.5, "\r"],
+          // the fork opens with the turn pre-filled: send it, so the model request that
+          // follows is the proof the injected summary is really in the fork's context
+          ["mock reply|Ask anything", 16, "\r"],
+          ["mock reply|Ask anything", 16, "\x03"],
+          ["", 1, "\x03"],
+        ],
+        timeoutSec: 240,
+        cols: 130,
+        rows: 34,
+        exitWhenDone: true,
+      })
+      // all three Pi answers, in Pi's order, from the one dialog ⏎ opens
+      expect(text).toContain("Fork & prefill this turn")
+      expect(text).toContain("No summary")
+      expect(text).toContain("Summarize everything below this point")
+      expect(text).toContain("Summarize with a custom prompt")
+
+      const dir = path.join(proj.dir, ".opencode", "context-tree")
+      const lines = readFileSync(path.join(dir, readdirSync(dir).find((f) => f.endsWith(".jsonl"))!), "utf8")
+      // the escape round changed nothing: exactly one fork, from the one ⏎ we went through with
+      expect(lines.split('"type":"branch.opened"').length - 1).toBe(1)
+      expect(lines).toContain('"kind":"redo"')
+      expect(lines).toContain('"type":"summary.recorded"')
+      // the summary was drafted from the abandoned turns, and the fork's next model request
+      // carries it: injected with noReply, it only reaches the provider on the following turn
+      const users = m.requests().map((r) => (r.body.messages as { role: string; content: unknown }[]).filter((x) => x.role === "user").map((x) => String(x.content)))
+      expect(users.some((u) => u.some((c) => c.includes("Create a structured summary of this conversation branch")))).toBe(true)
+      expect(users.some((u) => u.some((c) => c.startsWith("The user explored a different conversation branch")))).toBe(true)
+    } finally {
+      await m.stop()
+      await proj.cleanup()
+    }
+  }, 320_000)
+
   test("/tree opens the context tree route with rows and a context header", async () => {
     const text = await runTui({
       projectDir: project.dir,

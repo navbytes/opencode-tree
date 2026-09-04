@@ -6,7 +6,7 @@
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { PLUGIN_VERSION } from "../shared/version.js"
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
-import { planJump } from "../core/actions.js"
+import { abandonedTail, planJump, type AbandonedTail, type JumpPlan } from "../core/actions.js"
 import { foldJournal, type TreeState } from "../core/journal.js"
 import { firstIndex, lastIndex, moveSelection, nextBranchIndex, resolveSelection, toggleExpanded } from "../core/navigation.js"
 import { contextSizeOf, formatContext, formatK, type MinimalMessage } from "../core/tokens.js"
@@ -14,7 +14,7 @@ import { buildSpineMap, buildTreeView, currentChainOf, type Filter, type Row, ty
 import { ContextGauge } from "./gauge.js"
 import type { Transcript } from "../core/transcript.js"
 import type { JournalStore } from "../shared/store.js"
-import { applyCrop, branchLabel, BRANCH_DIALOG, clip as clipTo, copyText, createNamedBranch, executeJump, executeUndo, mergeBranch, mergeDialogOptions, mergeDialogTitle, mergePickerFigures, MERGE_TRUST, setLabel, UNDO_KEY, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
+import { applyCrop, branchLabel, BRANCH_DIALOG, clip as clipTo, copyText, createNamedBranch, describeTail, executeJump, executeUndo, jumpDialogOptions, jumpDialogTitle, mergeBranch, mergeDialogOptions, mergeDialogTitle, mergePickerFigures, MERGE_TRUST, setLabel, UNDO_KEY, type ActionContext, type MergeMode, type SummaryChoice } from "./actions.js"
 import { decisionSummary, exportDecisions, renderDecision } from "../core/decision.js"
 import { layoutEventStrip, overviewTrack, stripIndexFor, windowFor, type LaneMode, type StripCell } from "../core/lanes.js"
 import { bar, consumers, type Consumer, type ConsumerEntry } from "../core/consumers.js"
@@ -201,6 +201,7 @@ const HELP = [
   "  h l ← → fold/unfold a branch · Tab (or e) toggle · / live search · n N next/prev match",
   "Act",
   "  ⏎ go — a ⎇ header switches to it · a user turn forks & prefills it · a step forks after it",
+  "     then: no summary · summarize everything below that point · summarize with your own prompt (esc stays put)",
   "  b branch · m merge · c crop mode (space mark · a auto · t result⇄turn · ⏎ apply · esc leave)",
   "  u undo (alias x) · L label · y copy · E export decisions",
   "Views",
@@ -248,6 +249,9 @@ export function TreeRoute(props: TreeRouteProps) {
   const [selected, setSelected] = createSignal(0)
   const [others, setOthers] = createSignal<Record<string, Transcript>>({})
   const [busy, setBusy] = createSignal<string | undefined>()
+  /** Set while a jump is drafting its branch summary: `esc` cancels the draft, and with it the
+   *  jump — nothing has been forked or switched yet (Pi's `abortBranchSummary`). */
+  const [summaryAbort, setSummaryAbort] = createSignal<AbortController | undefined>()
   const [cropMode, setCropMode] = createSignal<"result" | "turn" | undefined>()
   const [panel, setPanel] = createSignal<"tree" | "decisions" | "consumers" | "help">(props.initialView ?? "tree")
   const [laneMode, setLaneMode] = createSignal<LaneMode>(api.kv.get<LaneMode>("ctree.lanes", "turns"))
@@ -816,44 +820,76 @@ export function TreeRoute(props: TreeRouteProps) {
     else api.route.navigate("home")
   }
 
-  function askSummary(): Promise<SummaryChoice> {
-    if (props.options.jumpSummary === "never") return Promise.resolve({ kind: "none" })
+  /**
+   * Pi's one question on `⏎` (its tree selector's "Summarize branch?"): the choice *is* the
+   * confirmation, so pressing enter on a row offers "start the fork clean", "summarize
+   * everything below this point" or "summarize with a prompt" in a single step.
+   *
+   * `esc` on the choices puts you back on the same row with nothing done, and cancelling the
+   * custom-prompt editor loops back to the choices rather than silently meaning "no summary"
+   * (`interactive-mode.ts#showTreeSelector`). With `jumpSummary: "never"`, or when the jump
+   * abandons nothing to summarize, it degrades to the plain confirm.
+   *
+   * Resolves `undefined` for "changed my mind, stay in the tree".
+   */
+  function askJump(plan: JumpPlan & { kind: "switch" | "fork" }, tail: AbandonedTail, title: string): Promise<SummaryChoice | undefined> {
+    const note =
+      plan.kind === "switch"
+        ? `The session you are on now stays exactly as it is. ${UNDO_KEY} undoes this.`
+        : `A new OpenCode session forks from ${sessionLabel(plan.sessionID)} at this point; nothing is deleted. ${UNDO_KEY} undoes this.`
+    if (props.options.jumpSummary === "never" || tail.messages.length === 0) return confirm(title, note).then((ok) => (ok ? { kind: "none" } : undefined))
+
     return new Promise((resolve) => {
-      api.ui.dialog.replace(
-        () =>
-          api.ui.DialogSelect({
-            title: "Summarize the branch you are leaving?",
-            options: [
-              { title: "No summary", value: "none", description: "just move" },
-              { title: "Summarize", value: "summarize", description: "Pi-style Goal / Progress / Decisions / Next steps" },
-              { title: "Summarize with custom prompt", value: "custom" },
-            ],
-            onSelect: (o) => {
-              if (o.value === "custom") {
-                api.ui.dialog.replace(
-                  () =>
-                    api.ui.DialogPrompt({
-                      title: "Custom summarization instructions",
-                      placeholder: "focus on…",
-                      onConfirm: (value) => {
-                        resolve({ kind: "summarize", customInstructions: value || undefined })
-                        api.ui.dialog.clear()
-                      },
-                      onCancel: () => {
-                        resolve({ kind: "none" })
-                        api.ui.dialog.clear()
-                      },
-                    }),
-                  () => resolve({ kind: "none" }),
-                )
-                return
-              }
-              resolve(o.value === "summarize" ? { kind: "summarize" } : { kind: "none" })
-              api.ui.dialog.clear()
-            },
-          }),
-        () => resolve({ kind: "none" }),
-      )
+      let done = false
+      // a `replace` closes the dialog under it, and that close fires the handler we passed for
+      // `esc`: the token makes every superseded handler a no-op, so only a real `esc` acts
+      let gen = 0
+      const settle = (value: SummaryChoice | undefined) => {
+        if (done) return
+        done = true
+        api.ui.dialog.clear()
+        resolve(value)
+      }
+      const openCustom = () => {
+        const mine = ++gen
+        const back = () => {
+          if (done || mine !== gen) return
+          openChoices()
+        }
+        api.ui.dialog.replace(
+          () =>
+            api.ui.DialogPrompt({
+              title: "Custom summarization instructions",
+              placeholder: "focus on…",
+              onConfirm: (value) => settle({ kind: "summarize", customInstructions: value.trim() || undefined }),
+              onCancel: back,
+            }),
+          back,
+        )
+      }
+      const openChoices = () => {
+        const mine = ++gen
+        const cancel = () => {
+          if (done || mine !== gen) return
+          settle(undefined)
+        }
+        api.ui.dialog.replace(
+          () =>
+            api.ui.DialogSelect({
+              title,
+              options: jumpDialogOptions(tail, plan.kind),
+              onSelect: (o) => {
+                if (o.value === "custom") {
+                  openCustom()
+                  return
+                }
+                settle(o.value === "summarize" ? { kind: "summarize" } : { kind: "none" })
+              },
+            }),
+          cancel,
+        )
+      }
+      openChoices()
     })
   }
 
@@ -927,20 +963,32 @@ export function TreeRoute(props: TreeRouteProps) {
     if (!row || !sessionID) return
     const plan = planJump(row, { transcripts: transcripts(), currentSessionID: sessionID })
     debug("route.jump", { row: { kind: row.kind, id: row.id }, plan })
+    if (plan.kind === "noop") {
+      notify(plan.reason)
+      return
+    }
+    // what the model would stop seeing: Pi's "entries from the old leaf to the common ancestor"
+    const tail = abandonedTail({ state: state(), transcripts: transcripts(), currentSessionID: sessionID, plan })
+    const title = jumpDialogTitle(plan, sessionLabel)
+    const choice = await askJump(plan, tail, title)
+    if (!choice) return
     await guarded("jump", async () => {
-      if (plan.kind === "noop") {
-        notify(plan.reason)
-        return
+      const controller = new AbortController()
+      const summarizing = choice.kind === "summarize"
+      if (summarizing) {
+        setSummaryAbort(controller)
+        notify(`summarizing ${describeTail(tail)} below this point — esc to skip`, 120_000)
       }
-      const from = sessionLabel(plan.sessionID)
-      const ok = await confirm(
-        plan.kind === "switch" ? `Switch to ${from}?` : plan.mode === "redo" ? "Fork & prefill this turn?" : "Fork after this step?",
-        plan.kind === "switch" ? `The session you are on now stays exactly as it is. ${UNDO_KEY} undoes this.` : `A new OpenCode session forks from ${from} at this point; nothing is deleted. ${UNDO_KEY} undoes this.`,
-      )
-      if (!ok) return
-      const summary = await askSummary()
-      const target = await executeJump(ctx, plan, { currentSessionID: sessionID, summary })
-      if (target) api.ui.toast({ message: `moved to ${sessionLabel(target)} · ${UNDO_KEY} undoes it` })
+      try {
+        const out = await executeJump(ctx, plan, { currentSessionID: sessionID!, summary: choice, abandoned: tail.messages, signal: controller.signal })
+        if (out.aborted) {
+          notify("summary cancelled — nothing moved")
+          return
+        }
+        if (out.target) api.ui.toast({ message: `moved to ${sessionLabel(out.target)} · ${UNDO_KEY} undoes it` })
+      } finally {
+        setSummaryAbort(undefined)
+      }
     })
   }
 
@@ -1264,6 +1312,13 @@ export function TreeRoute(props: TreeRouteProps) {
         name: "ctree.back",
         hidden: true,
         run: () => {
+          const draft = summaryAbort()
+          if (draft) {
+            draft.abort()
+            setSummaryAbort(undefined)
+            notify("cancelling the branch summary…")
+            return
+          }
           if (panel() !== "tree") {
             setPanel("tree")
             return

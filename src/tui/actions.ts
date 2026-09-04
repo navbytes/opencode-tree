@@ -11,8 +11,9 @@ import type { JournalStore } from "../shared/store.js"
 import { withBranchLabel, type CropAppliedData, type JournalEntry, type TreeState } from "../core/journal.js"
 import type { UndoPlan } from "../core/undo.js"
 import type { TranscriptMessage } from "../core/transcript.js"
+import type { AbandonedTail } from "../core/actions.js"
 import { contextSizeOf, formatK, type MinimalMessage } from "../core/tokens.js"
-import { DECISION_SYSTEM, branchTranscriptText, buildDecisionDraftPrompt, decisionMessageText, decisionRecord, decisionTemplate, openSiblings, templatePlaceholders } from "../core/decision.js"
+import { DECISION_SYSTEM, branchTranscriptText, transcriptText, buildDecisionDraftPrompt, decisionMessageText, decisionRecord, decisionTemplate, openSiblings, templatePlaceholders } from "../core/decision.js"
 import { editInExternalEditor, hasEditor } from "./editor.js"
 import { debug } from "../shared/debug.js"
 import { fetchTranscript } from "./transcripts.js"
@@ -32,6 +33,10 @@ export type ActionContext = {
 }
 
 export type SummaryChoice = { kind: "none" } | { kind: "summarize"; customInstructions?: string }
+
+/** Where a jump ended up: `target` when it moved, `aborted` when the user pressed `esc`
+ *  during the summary draft and nothing was changed at all. */
+export type JumpOutcome = { target?: string; aborted?: boolean }
 
 const [revision, setRevision] = createSignal(0)
 /** The journal is plain files, so views built from `store.stateFor*` subscribe to this
@@ -184,32 +189,65 @@ export async function createNamedBranch(
   return forkedID
 }
 
-/** Execute a jump plan (DESIGN.md §6.2). Returns the session we ended up in. */
+/**
+ * Execute a jump plan (DESIGN.md §6.2), Pi's `navigateTree` order:
+ *
+ * 1. abort a streaming response on the session we are leaving (Pi #7022), so the summary
+ *    covers the reply as it actually ended;
+ * 2. draft the branch summary **before** anything moves, so `esc` (an aborted `signal`)
+ *    leaves you exactly where you were — `{ aborted: true }`, no fork, no switch;
+ * 3. fork or switch;
+ * 4. inject the summary at the destination, the way Pi attaches its `branch_summary` entry
+ *    at the new leaf rather than on the branch it left.
+ *
+ * A summary that *fails* (as opposed to being aborted) never blocks the move: we say so and
+ * go anyway, because the alternative is stranding the user on the session they asked to leave.
+ */
 export async function executeJump(
   ctx: ActionContext,
   plan: JumpPlan,
-  opts: { currentSessionID: string; summary: SummaryChoice },
-): Promise<string | undefined> {
-  debug("jump.plan", { plan, current: opts.currentSessionID, summary: opts.summary.kind })
+  opts: { currentSessionID: string; summary: SummaryChoice; abandoned?: readonly TranscriptMessage[]; signal?: AbortSignal },
+): Promise<JumpOutcome> {
+  debug("jump.plan", { plan, current: opts.currentSessionID, summary: opts.summary.kind, abandoned: opts.abandoned?.length ?? 0 })
   if (plan.kind === "noop") {
     notify(ctx, { message: plan.reason })
-    return undefined
+    return {}
   }
+
+  // Pi stops the active response as soon as the user commits to navigating, before it
+  // summarizes, so the summary covers the reply as it actually ended (interactive-mode.ts).
   await abortIfBusy(ctx, opts.currentSessionID)
   const leavingTip = ctx.api.state.session.messages(opts.currentSessionID).at(-1)?.id
+  const wanted = opts.summary.kind === "summarize" && (opts.abandoned?.length ?? 0) > 0
+
+  let summary: string | undefined
+  let summaryNotice: TuiToast | undefined
+  if (wanted) {
+    try {
+      summary = await draftBranchSummary(ctx, { messages: opts.abandoned ?? [], customInstructions: opts.summary.kind === "summarize" ? opts.summary.customInstructions : undefined, signal: opts.signal })
+    } catch (e) {
+      if (opts.signal?.aborted) {
+        debug("jump.summary.aborted", {})
+        return { aborted: true }
+      }
+      summaryNotice = { variant: "error", message: `summary failed: ${e instanceof Error ? e.message : String(e)} — moved without it` }
+    }
+    if (opts.signal?.aborted) return { aborted: true }
+  }
+
   let target: string
   if (plan.kind === "switch") {
     target = plan.sessionID
   } else {
     target = await forkBranch(ctx, { sessionID: plan.sessionID, messageID: plan.messageID, kind: plan.mode === "redo" ? "redo" : "jump" })
   }
-  let summaryNotice: TuiToast | undefined
-  if (opts.summary.kind === "summarize" && leavingTip && target !== opts.currentSessionID) {
-    // the fork already exists; a failed summary must not strand the user on the old session
-    await summarizeInto(ctx, { fromSessionID: opts.currentSessionID, fromMessageID: leavingTip, targetSessionID: target, customInstructions: opts.summary.customInstructions })
+
+  if (summary && target !== opts.currentSessionID) {
+    await injectBranchSummary(ctx, { summary, targetSessionID: target, fromSessionID: opts.currentSessionID, fromMessageID: leavingTip ?? "" })
       .then(() => (summaryNotice = { variant: "success", message: "Branch summary added" }))
       .catch((e) => (summaryNotice = { variant: "error", message: `summary failed: ${e instanceof Error ? e.message : String(e)} — moved without it` }))
   }
+
   debug("jump.navigate", { target })
   navigateToSession(ctx, target)
   // the route has unmounted by now, so this always goes through the toast, not ctx.notify
@@ -218,31 +256,61 @@ export async function executeJump(
     await new Promise((r) => setTimeout(r, 0))
     await ctx.api.client.tui.appendPrompt({ text: plan.prefill, directory: ctx.directory }).catch(() => undefined)
   }
-  return target
+  return { target }
 }
 
-/** Pi-style summary of the branch we are leaving, generated in a throw-away helper session and
- *  injected into the destination with `noReply` (DESIGN.md §6.2, journal `summary.recorded`). */
-export async function summarizeInto(
+/** What `⏎` is about to do to the selected row — Pi asks only "Summarize branch?", but the
+ *  choice is also the confirmation here, so the action belongs in the title. */
+export function jumpDialogTitle(plan: JumpPlan, label: (sessionID: string) => string): string {
+  if (plan.kind === "noop") return "Nothing to go to"
+  if (plan.kind === "switch") return `Switch to ${label(plan.sessionID)}?`
+  return plan.mode === "redo" ? "Fork & prefill this turn?" : "Fork after this step?"
+}
+
+/** `3 turns · ~14k` — the size of what a jump leaves behind, for the dialog and the notice. */
+export function describeTail(tail: AbandonedTail): string {
+  const what = tail.turns > 0 ? plural(tail.turns, "turn") : plural(tail.messages.length, "message")
+  return `${what} · ~${formatK(tail.tokens)}`
+}
+
+export type JumpChoice = "none" | "summarize" | "custom"
+
+/**
+ * Pi's three answers to `⏎` on an earlier row, in Pi's order — "No summary" first, so `⏎⏎`
+ * stays the safe move (`interactive-mode.ts#showTreeSelector`). A fork names the point you
+ * picked ("everything below this point"); a switch has no such point, only the path it
+ * leaves. Descriptions render on the option's own line and truncate past ~50 columns, so
+ * they stay short.
+ */
+export function jumpDialogOptions(tail: AbandonedTail, kind: "fork" | "switch"): { title: string; value: JumpChoice; description: string }[] {
+  const leaving = describeTail(tail)
+  return [
+    { title: "No summary", value: "none", description: "start clean · nothing carried over" },
+    { title: kind === "fork" ? "Summarize everything below this point" : "Summarize what you are leaving", value: "summarize", description: `carry the ${leaving} over as one ≣ summary` },
+    { title: "Summarize with a custom prompt", value: "custom", description: "the same, with your own focus" },
+  ]
+}
+
+/**
+ * Draft the Pi-format summary of the turns a jump leaves behind, in a throw-away helper
+ * session that is deleted again (no provider keys of our own; DESIGN.md §6.2).
+ *
+ * `signal` is honoured between steps and aborts the helper session's in-flight reply, so
+ * `esc` in the tree gets out of a slow summarizer.
+ */
+export async function draftBranchSummary(
   ctx: ActionContext,
-  input: { fromSessionID: string; fromMessageID: string; targetSessionID: string; customInstructions?: string; signal?: AbortSignal },
-): Promise<string | undefined> {
-  const msgs = await ctx.api.client.session.messages({ sessionID: input.fromSessionID, directory: ctx.directory })
-  const transcript = ((msgs.data as any[]) ?? [])
-    .map((m) => {
-      const role = m.info.role === "user" ? "[User]" : "[Assistant]"
-      const text = (m.parts as any[])
-        .map((p) => (p.type === "text" ? p.text : p.type === "tool" ? `(tool ${p.tool}: ${JSON.stringify(p.state?.input ?? {}).slice(0, 200)} → ${String(p.state?.output ?? "").slice(0, 400)})` : ""))
-        .filter(Boolean)
-        .join("\n")
-      return text ? `${role}: ${text}` : ""
-    })
-    .filter(Boolean)
-    .join("\n\n")
-  debug("summary.start", { from: input.fromSessionID, target: input.targetSessionID, chars: transcript.length })
+  input: { messages: readonly TranscriptMessage[]; customInstructions?: string; signal?: AbortSignal },
+): Promise<string> {
+  const transcript = transcriptText(input.messages, 400)
+  if (!transcript.trim()) throw new Error("nothing to summarize")
+  debug("summary.start", { messages: input.messages.length, chars: transcript.length })
+  if (input.signal?.aborted) throw new Error("aborted")
   const helper = await ctx.api.client.session.create({ directory: ctx.directory, title: "Context tree: branch summary" })
   const helperID = (helper.data as any)?.id as string | undefined
   if (!helperID) throw new Error("could not create helper session")
+  const stop = () => void ctx.api.client.session.abort({ sessionID: helperID, directory: ctx.directory }).catch(() => undefined)
+  input.signal?.addEventListener("abort", stop, { once: true })
   try {
     const instructions = input.customInstructions ? `${SUMMARY_INSTRUCTIONS}\n\nAdditional focus from the user:\n${input.customInstructions}` : SUMMARY_INSTRUCTIONS
     const reply = await ctx.api.client.session.prompt({
@@ -251,6 +319,7 @@ export async function summarizeInto(
       system: SUMMARY_SYSTEM,
       parts: [{ type: "text", text: `<conversation>\n${transcript}\n</conversation>\n\n${instructions}` }],
     })
+    if (input.signal?.aborted) throw new Error("aborted")
     const summary = ((reply.data as any)?.parts as any[] | undefined)
       ?.filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
       .map((p) => p.text)
@@ -258,19 +327,28 @@ export async function summarizeInto(
       .trim()
     debug("summary.generated", { chars: summary?.length ?? 0 })
     if (!summary) throw new Error("summary model returned no text")
-    const injected = await ctx.api.client.session.prompt({
-      sessionID: input.targetSessionID,
-      directory: ctx.directory,
-      noReply: true,
-      parts: [{ type: "text", text: SUMMARY_PREAMBLE + summary, metadata: { ctree: { kind: "summary", fromSessionID: input.fromSessionID } } }],
-    })
-    const messageID = (injected.data as any)?.info?.id ?? (injected.data as any)?.id
-    const treeId = ctx.store.ensureTree(input.targetSessionID, "tui")
-    record(ctx, treeId, "summary.recorded", { sessionID: input.targetSessionID, messageID: String(messageID ?? ""), fromSessionID: input.fromSessionID, fromMessageID: input.fromMessageID })
     return summary
   } finally {
+    input.signal?.removeEventListener("abort", stop)
     await ctx.api.client.session.delete({ sessionID: helperID, directory: ctx.directory }).catch(() => undefined)
   }
+}
+
+/** Land a drafted summary at the destination as a `noReply` user message, journalled as
+ *  `summary.recorded` so `/undo` and the ◇ decisions view can tell it from a ◆ merge. */
+export async function injectBranchSummary(
+  ctx: ActionContext,
+  input: { summary: string; targetSessionID: string; fromSessionID: string; fromMessageID: string },
+): Promise<void> {
+  const injected = await ctx.api.client.session.prompt({
+    sessionID: input.targetSessionID,
+    directory: ctx.directory,
+    noReply: true,
+    parts: [{ type: "text", text: SUMMARY_PREAMBLE + input.summary, metadata: { ctree: { kind: "summary", fromSessionID: input.fromSessionID } } }],
+  })
+  const messageID = (injected.data as any)?.info?.id ?? (injected.data as any)?.id
+  const treeId = ctx.store.ensureTree(input.targetSessionID, "tui")
+  record(ctx, treeId, "summary.recorded", { sessionID: input.targetSessionID, messageID: String(messageID ?? ""), fromSessionID: input.fromSessionID, fromMessageID: input.fromMessageID })
 }
 
 export function setLabel(ctx: ActionContext, input: { sessionID: string; messageID: string; label: string | null }): void {

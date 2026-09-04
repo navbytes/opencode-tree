@@ -1,6 +1,31 @@
 # Changelog
 
-## 0.2.2 (unreleased)
+## 0.2.3 (unreleased)
+
+Pi's fork-from-an-earlier-message flow, ported whole:
+
+- `⏎` on a row above where you are now opens Pi's tree-selector question — **No summary** /
+  **Summarize everything below this point** / **Summarize with a custom prompt** — and that
+  question is the confirmation, so the fork is one dialog instead of a yes/no followed by a
+  second one. The option lines say how much you are leaving (`drop the 3 turns · ~14k below
+  this point`).
+- The summary now covers **what the jump abandons**, not the whole session: the turns from
+  where you are back to the point your path and the target's path last shared, computed across
+  sessions from their spines (Pi's "old leaf → common ancestor"). Redoing trunk turn 2
+  summarizes turns 2–3; switching from a branch to a sibling summarizes the branch's own turns
+  and not the shared trunk.
+- `esc` in the picker now really cancels: it puts you back on the same row with nothing forked,
+  where before it moved you anyway without a summary. Cancelling the custom-prompt editor goes
+  back to the three choices instead of quietly meaning "no summary".
+- Nothing moves until the summary exists. The draft runs first, so `esc` while it is being
+  written aborts the draft *and* the jump (the helper session's reply is aborted too) and
+  leaves you where you were. A summary that fails outright still lets the move through, with a
+  notice. A streaming reply on the session you are leaving is aborted before the draft, so the
+  summary covers the reply as it actually ended.
+- A jump with nothing below the selected point, and `jumpSummary: "never"`, skip the question
+  and show the plain confirm.
+
+## 0.2.2 — 2026-09-03
 
 Found by a long driven session on a real model (13 tool-using turns, three fork paths, three
 merge paths, result and turn crops, undo, resume) and 50/100/200-turn scale runs:
