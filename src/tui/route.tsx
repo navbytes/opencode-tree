@@ -900,7 +900,14 @@ export function TreeRoute(props: TreeRouteProps) {
         const mine = ++gen
         const back = () => {
           if (done || mine !== gen) return
-          openChoices()
+          // The host's own post-esc dismissal runs right after this handler returns, and it
+          // targets whatever was on top of the stack when `esc` was pressed — if we `replace`
+          // synchronously here, that dismissal fires *after* us and wipes the choices dialog
+          // right back off. Deferring a tick lets the host finish closing first.
+          setTimeout(() => {
+            if (done || mine !== gen) return
+            openChoices()
+          }, 0)
         }
         api.ui.dialog.replace(
           () =>
