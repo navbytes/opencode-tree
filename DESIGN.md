@@ -504,6 +504,15 @@ records as user messages, and can use the headless `/ctree` commands.
 > cells would merge and the pills would stop being countable events. When the layout overflows,
 > a one-line overview track under the lanes shows the window's position and red ticks at failed
 > tool calls, so global orientation survives without giving up pill fidelity.
+>
+> **Model switches (0.2.5).** Colour on the Model lane is categorical by *kind* (text vs.
+> reasoning), not by which model answered — recoloring per model would compete with that and
+> with the error/warning colours other lanes already use. So a mid-session model change (an
+> explicit switch, not a branch's fixed `--model`) is marked structurally instead: the turn
+> rule on the Model lane thickens to `┃` at the turn where the answering model differs from the
+> last turn that had one. The inspector's `Model` line (now populated for assistant turns and
+> steps, from the message's own `providerID`/`modelID`) is the way to confirm which model that
+> actually was.
 
 **On the DSH comparison.** The three-lane split is ours. DSH's own `ui-trajectory` README
 describes a *single* combined Overview ("A fixed Overview above the ledger projects real record

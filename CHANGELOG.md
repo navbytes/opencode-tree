@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.5
+
+- **The model that answered is no longer invisible.** `TranscriptMessage` now carries the
+  assistant's `providerID`/`modelID` (it was already on OpenCode's own message, just never
+  copied over), so the inspector shows a `Model` line for assistant turns and steps, not only
+  for branch headers. The Model lane's turn rule also thickens (`┃` instead of `│`) at the turn
+  where the answering model actually switches — colour there was already spoken for by
+  kind (text/reasoning), so a switch gets a shape change on the rule rather than a competing
+  colour.
+
+- **Fixed:** `y` silently did nothing on a `⎇` branch row or a separator — there's no message
+  there to copy, but it gave no feedback either, which read as "copy is broken" rather than
+  "nothing here to copy." It now notifies either way.
+
+- **Fixed: `y` on a large payload could report success while the terminal quietly dropped it.**
+  OSC 52 (the escape-sequence clipboard `y` used) has no ack from the terminal — a `true` from
+  `@opentui` only means the sequence was written, not that the terminal actually applied it, and
+  some terminals silently truncate or drop payloads past their own size cap. `copyText` now
+  always writes `.opencode/context-tree/last-copy.txt` too, clipboard hit or not, so a paste
+  that silently didn't land still has one reliable place to read it from — the toast says so
+  when the target was the clipboard.
+
 ## 0.2.4 — 2026-09-04
 
 - Consumers (`s`) counts the **system prompt**. It walked the transcript only, so its total
