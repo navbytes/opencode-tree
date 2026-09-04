@@ -4,7 +4,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import path from "node:path"
-import { readFileSync, readdirSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { createProject, installPlugins, REPO_ROOT, runTui, runTuiScreens, startMock, type StartedMock } from "./harness.js"
 
 const e2e = process.env["CTREE_E2E"] === "1"
@@ -236,8 +236,10 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
     const proj = await createProject({ mockPort: m.port })
     await installPlugins({ projectDir: proj.dir, server: [path.join(REPO_ROOT, "dist", "server.js")], tui: [path.join(REPO_ROOT, "dist", "tui.js")] })
     try {
+      const log = path.join(proj.dir, "ctree-debug.log")
       const text = await runTui({
         projectDir: proj.dir,
+        env: { CTREE_DEBUG: log },
         keys: [
           // a plain session that never branches: the case the capture must not miss
           ["Ask anything", 1, "hello\r"],
@@ -255,7 +257,9 @@ describe.skipIf(!e2e)("tui e2e: built plugin", () => {
 
       // 1. the assumption the whole feature rests on: `output.system` arrives carrying
       //    OpenCode's own parts, so there is something real to snapshot
+      const debugLog = existsSync(log) ? readFileSync(log, "utf8") : "(no debug log)"
       const dir = path.join(proj.dir, ".opencode", "context-tree")
+      if (!existsSync(dir)) throw new Error(`no context-tree dir. debug log:\n${debugLog.split("\n").filter((l) => l.includes("system")).join("\n") || debugLog.slice(0, 2000)}`)
       const snap = readdirSync(dir).find((f) => f.startsWith("system-") && f.endsWith(".json"))
       expect(snap).toBeDefined()
       const parsed = JSON.parse(readFileSync(path.join(dir, snap!), "utf8")) as { v: number; parts: { name: string; chars: number; text: string }[] }
