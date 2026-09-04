@@ -536,7 +536,8 @@ the branch structure (ancestry axis). That is the layout:
   size, red if error). Cursor position is mirrored in the lanes;
 - **inspector on the right = DSH inspector**: Summary / Payload / Result / Schema /
   Timing / Crop for the selected row; toggled with `i`; below 110 columns it becomes a
-  full-screen view instead (this is `pi-context-tree`'s *inspect* view).
+  full-screen view instead (this is `pi-context-tree`'s *inspect* view) — **implemented in
+  0.2.3**, along with `shift+i` to ask for it on any width and `PgUp`/`PgDn` to page it.
 
 ### 7.2 Mockup (≥110 columns)
 
@@ -610,6 +611,29 @@ how the Turns/Calls bug shipped.
 - **Crop mode** (`c`): the same list with checkboxes and a running reclaimed total;
   the inspector's *Crop* facet explains protection (latest per tool, current turn,
   decision, `keep` glob).
+
+
+**Reading a long field (0.2.3).** The inspector used to cap each field at a fixed 8 / 10 / 14
+lines whatever the terminal, ending in a dead `… 61 more lines (y to copy)`; it had no scroll
+state at all, and below 110 columns `i` flipped a flag that rendered nothing and said nothing.
+Three changes, in the order they matter:
+
+1. **The caps follow the pane.** Every line is materialised (bounded by `INSPECTOR_MAX_LINES`
+   only so a pathological payload cannot build an unbounded array per render) and the *window*
+   is sized from `height()`, so a tall terminal simply shows more instead of leaving the pane
+   half empty under a truncation notice.
+2. **`PgUp` / `PgDn` page it**, with no focus mode: `j`/`k` must keep driving the row selection,
+   because that is what chooses the inspector's content, and a focus concept would add modality
+   to a route that has none. `core/navigation.ts#paneWindow`/`scrollPane` hold the arithmetic
+   (clamped in the getter, so a resize or a shorter row cannot strand the view past the end);
+   the foot of the pane reads `12–40 of 118 · PgUp/PgDn · y copy · I full`. The offset resets
+   when the selected row changes — new content, new top.
+3. **`shift+i` is full screen**, and is also what `i` does below 110 columns. A ~40-column pane
+   is not a JSON viewer; this is the "view all of it" answer, and it retires the narrow-terminal
+   dead end in the same mechanism.
+
+`y` stays the answer for actually *reading* a large payload — copy it somewhere with search and
+folding. The scroller is for "there were twelve more lines and I want to glance at them".
 
 ### 7.5 Filters and search (from Pi)
 

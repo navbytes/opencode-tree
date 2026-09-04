@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { cycleFilter, firstIndex, lastIndex, moveSelection, nextBranchIndex, resolveSelection, toggleExpanded } from "../src/core/navigation.js"
+import { cycleFilter, firstIndex, lastIndex, moveSelection, nextBranchIndex, paneWindow, resolveSelection, scrollPane, toggleExpanded } from "../src/core/navigation.js"
 import { buildTreeView } from "../src/core/tree.js"
 import { buildFixture, OPEN, TRUNK } from "./fixtures/tree.js"
 
@@ -63,5 +63,47 @@ describe("separator rows are decoration, never the cursor", () => {
   test("nextBranchIndex still only lands on branch rows", () => {
     const i = nextBranchIndex(branchView.rows, 0, 1)
     expect(branchView.rows[i]!.kind).toBe("branch")
+  })
+})
+
+describe("paneWindow — the inspector scroller", () => {
+  test("content shorter than the pane never scrolls", () => {
+    expect(paneWindow(5, 20, 0)).toEqual({ start: 0, from: 1, to: 5 })
+    expect(paneWindow(5, 20, 99)).toEqual({ start: 0, from: 1, to: 5 })
+  })
+  test("the last page sits flush with the end instead of scrolling into blank space", () => {
+    expect(paneWindow(118, 20, 999)).toEqual({ start: 98, from: 99, to: 118 })
+    expect(paneWindow(118, 20, 98)).toEqual({ start: 98, from: 99, to: 118 })
+  })
+  test("mid-scroll reads as the screenshot's missing figure would", () => {
+    expect(paneWindow(118, 29, 11)).toEqual({ start: 11, from: 12, to: 40 })
+  })
+  test("empty content reports nothing rather than 1–0 of 0", () => {
+    expect(paneWindow(0, 20, 0)).toEqual({ start: 0, from: 0, to: 0 })
+  })
+  test("a shorter row cannot strand the view past the end (clamping is in the getter)", () => {
+    const deep = paneWindow(500, 20, 400).start
+    expect(paneWindow(30, 20, deep)).toEqual({ start: 10, from: 11, to: 30 })
+  })
+})
+
+describe("scrollPane", () => {
+  test("a page down overlaps by two lines so the eye keeps its place", () => {
+    expect(scrollPane(118, 20, 0, 1)).toBe(18)
+    expect(scrollPane(118, 20, 18, 1)).toBe(36)
+  })
+  test("up and down are symmetric, and both clamp", () => {
+    expect(scrollPane(118, 20, 18, -1)).toBe(0)
+    expect(scrollPane(118, 20, 0, -1)).toBe(0)
+    expect(scrollPane(118, 20, 98, 1)).toBe(98)
+  })
+  test("paging down repeatedly lands on the last page and stops", () => {
+    let top = 0
+    for (let i = 0; i < 50; i++) top = scrollPane(118, 20, top, 1)
+    expect(top).toBe(98)
+    expect(paneWindow(118, 20, top).to).toBe(118)
+  })
+  test("a pane of one line still advances", () => {
+    expect(scrollPane(10, 1, 0, 1)).toBe(1)
   })
 })

@@ -2,6 +2,22 @@
 
 ## 0.2.3 (unreleased)
 
+- **The inspector shows the whole field now, and pages through it.** It used to cap each field
+  at a fixed 8 (Payload) / 10 (Result) / 14 (Text) lines whatever the terminal, so a tall
+  window sat half empty under a dead `… 61 more lines (y to copy)`, and it had no scroll state
+  at all.
+  - The window is sized from the terminal, so a taller terminal shows more with no keys at all.
+  - `PgUp` / `PgDn` page it — no focus mode, since `j`/`k` must keep choosing which row the
+    inspector is describing. The foot of the pane reads `12–40 of 118 · PgUp/PgDn · y copy ·
+    I full`, and the offset resets when you move to another row.
+  - `shift+i` opens the inspector **full screen** (and from closed, opens it there directly);
+    `esc` returns it to the side pane. A ~40-column pane is not a JSON viewer, so this is the
+    "show me all of it" answer; `y` remains the answer for actually reading a large payload
+    somewhere with search and folding.
+- **Fixed:** below 110 columns the side pane does not fit, and `i` flipped a flag that rendered
+  nothing and gave no feedback — the inspector was simply dead on an 80-column terminal. It now
+  opens full screen there, which is what DESIGN.md §7.1 promised and never shipped.
+
 - **Turns and Calls drew the same chart.** The lane modes only ever differed by one blank cell
   at each turn boundary — everything else (which events, which lanes, glyphs, colours) was
   identical, so switching between them looked like nothing happened. Checking DeepSeek Harness

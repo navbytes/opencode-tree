@@ -122,3 +122,25 @@ export function resolveSelection(
 
   return land(0)
 }
+
+/**
+ * Window into a scrollable pane (the inspector, DESIGN.md §7.4): `room` lines drawn out of
+ * `total`, starting at `top`. `start` is clamped so the last page sits flush with the end
+ * rather than scrolling past it into blank space, and never below 0 when the content is
+ * shorter than the pane. `from`/`to` are 1-based and inclusive, for a `12–40 of 118` readout.
+ *
+ * Clamping lives here, not in the setter, so a resize or a shorter row cannot strand the view
+ * past the end of the new content.
+ */
+export function paneWindow(total: number, room: number, top: number): { start: number; from: number; to: number } {
+  const r = Math.max(1, room)
+  const start = Math.max(0, Math.min(Math.max(0, Math.floor(top)), total - r))
+  return { start, from: total === 0 ? 0 : start + 1, to: Math.min(total, start + r) }
+}
+
+/** One page up or down, overlapping by two lines so the eye keeps its place. */
+export function scrollPane(total: number, room: number, top: number, dir: 1 | -1): number {
+  const r = Math.max(1, room)
+  const step = Math.max(1, r - 2)
+  return paneWindow(total, r, paneWindow(total, r, top).start + dir * step).start
+}
